@@ -253,15 +253,102 @@ Output a structured report:
 4. Known risks: rate limiting patterns, token expiry, content filtering
 ```
 
-### Step 6: Assist with Implementation (if requested)
+### Step 6: Compile API Spec (when user is ready to develop)
 
-If the user wants to build an API client based on the analysis:
+When the user says "整理 API 文档", "compile API spec", or is about to start implementation, consolidate all captures for a domain into one definitive spec.
 
-1. **Generate a Python client class** with methods for each discovered endpoint
-2. **Implement signature/auth logic** if the algorithm is identifiable from the captured data
-3. **Set up Playwright browser automation** for endpoints that require it
-4. **Write polling/retry logic** for async task patterns (submit → poll → download)
-5. **Create a new profile** if the user plans to capture more from this site
+#### When to trigger
+- User explicitly asks to compile/consolidate/整理
+- User is about to start coding and there are multiple capture files for the same domain
+- Do NOT auto-trigger after a single capture — the user may plan more captures first
+
+#### How to compile
+
+1. **List all reports for the domain:**
+```bash
+ls $TOOL_DIR/reports/{domain}*.md
+```
+
+2. **Read all report Markdown files** for that domain (chronologically)
+
+3. **Merge and deduplicate:**
+   - Union all unique endpoints across all captures
+   - For endpoints that appear in multiple captures, use the most recent and most complete example
+   - Merge auth analysis (union of all cookies, headers, params seen)
+   - Identify endpoints only seen in specific workflows (tag them, e.g., `[chat-only]`, `[video-only]`)
+
+4. **Write the consolidated spec** to `$TOOL_DIR/reports/{domain}_api_spec.md`:
+
+```markdown
+# {Site Name} — API Specification
+
+> Compiled from N captures ({date_range})
+> Profile: {profile_name}
+
+## Authentication
+[Merged auth analysis — all cookies, tokens, signatures observed across all captures]
+
+## Anti-Scraping
+[Verdict — which endpoints need browser, which work with pure HTTP]
+
+## API Flow
+[Combined flow diagram covering all workflows captured]
+
+### Flow: Chat
+1. init → 2. create conversation → 3. send message → 4. stream response
+
+### Flow: Image Generation (if captured)
+1. upload image → 2. submit task → 3. poll → 4. download
+
+## Endpoint Reference
+
+### Category: init
+| Method | Path | Purpose | Auth | Notes |
+|--------|------|---------|------|-------|
+| POST | /webid | Get device web_id | none | Called once per session |
+| ... | ... | ... | ... | ... |
+
+### Category: chat
+| Method | Path | Purpose | Auth | Notes |
+|--------|------|---------|------|-------|
+| POST | /chat/completion | Send message (SSE) | cookie + a_bogus | Browser required |
+| ... | ... | ... | ... | ... |
+
+[Continue for each category...]
+
+## Endpoint Details
+
+### POST /chat/completion [chat]
+- **Purpose:** Send a chat message and receive streaming response
+- **Auth:** Cookie session + msToken + a_bogus (browser required)
+- **Request Body:**
+  ```json
+  {field: type, ...}
+  ```
+- **Response:** SSE stream / JSON
+- **Notes:** [Any quirks, rate limits, error codes observed]
+
+[Continue for each endpoint...]
+```
+
+5. **Also update credentials** — read `$TOOL_DIR/credentials/{domain}.json` and note which credentials are needed for which endpoints in the spec.
+
+#### Output
+- Compiled spec: `$TOOL_DIR/reports/{domain}_api_spec.md`
+- This file is the **single source of truth** for development — all implementation should reference it
+- It replaces reading individual capture reports (those are kept for historical reference)
+
+### Step 7: Assist with Implementation (if requested)
+
+If the user wants to build an API client based on the compiled spec:
+
+1. **Read the API spec** at `$TOOL_DIR/reports/{domain}_api_spec.md`
+2. **Read credentials** at `$TOOL_DIR/credentials/{domain}.json`
+3. **Generate a Python client class** with methods for each endpoint in the spec
+4. **Implement signature/auth logic** if the algorithm is identifiable
+5. **Set up Playwright browser automation** for endpoints marked as browser-required
+6. **Write polling/retry logic** for async task patterns (submit → poll → download)
+7. **Create a new profile** if the user plans to capture more from this site
 
 ---
 
