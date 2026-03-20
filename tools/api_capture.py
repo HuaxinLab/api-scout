@@ -139,17 +139,73 @@ def is_api_request(url: str, content_type: str | None, resource_type: str,
     return False
 
 
+def parse_sse(text: str) -> dict:
+    """Parse SSE text into a summary: sample events + stats."""
+    events = []
+    current_event = ""
+    current_data_lines = []
+
+    for line in text.split("\n"):
+        if line.startswith("event:"):
+            current_event = line[6:].strip()
+        elif line.startswith("data:"):
+            current_data_lines.append(line[5:].strip())
+        elif line.startswith("id:"):
+            pass  # skip id lines
+        elif line == "" and (current_event or current_data_lines):
+            data_str = "\n".join(current_data_lines)
+            # Try parse data as JSON
+            data = data_str
+            try:
+                data = json.loads(data_str)
+            except (json.JSONDecodeError, TypeError):
+                pass
+            events.append({"event": current_event or "message", "data": data})
+            current_event = ""
+            current_data_lines = []
+
+    # Flush last event
+    if current_event or current_data_lines:
+        data_str = "\n".join(current_data_lines)
+        try:
+            data = json.loads(data_str)
+        except (json.JSONDecodeError, TypeError):
+            data = data_str
+        events.append({"event": current_event or "message", "data": data})
+
+    if not events:
+        return None
+
+    # Build summary: first 5 events as samples + event type counts
+    event_counts = {}
+    for e in events:
+        event_counts[e["event"]] = event_counts.get(e["event"], 0) + 1
+
+    return {
+        "_sse_summary": True,
+        "total_events": len(events),
+        "event_counts": event_counts,
+        "sample_events": events[:5],
+    }
+
+
 def safe_body(body: bytes | str | None, content_type: str | None = None) -> str | dict | None:
-    """Decode and truncate body safely."""
+    """Decode and truncate body safely. SSE responses get parsed into summary."""
     if body is None:
         return None
     if isinstance(body, bytes):
-        if len(body) > MAX_BODY_SIZE:
-            return f"<binary {len(body)} bytes, truncated>"
         try:
             body = body.decode("utf-8")
         except UnicodeDecodeError:
             return f"<binary {len(body)} bytes>"
+
+    # Detect SSE: starts with "id:" or "event:" or "data:"
+    stripped = body.lstrip()
+    if stripped[:3] in ("id:", "dat") or stripped[:6] == "event:":
+        sse = parse_sse(body)
+        if sse:
+            return sse
+
     if len(body) > MAX_BODY_SIZE:
         return body[:MAX_BODY_SIZE] + f"\n... <truncated, total {len(body)} chars>"
     # Try parse as JSON

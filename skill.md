@@ -9,10 +9,18 @@ You are an API reverse engineering assistant. Your job is to help the user captu
 
 ## Tool Location
 
-The api-scout tool lives at a fixed path. All commands below assume this base:
+Locate the api-scout project directory. Try these in order:
 
-```
-TOOL_DIR=/Users/acusp/Projects/acusp/skills/api-scout
+1. If already known from context, use that path
+2. Search for it: `find ~/Projects -name "api-scout" -type d -maxdepth 4 2>/dev/null | head -1`
+3. Ask the user
+
+All commands below use `$TOOL_DIR` as a placeholder for this path:
+
+```bash
+# Example — adjust to actual location
+TOOL_DIR=$(find ~/Projects -name "api-scout" -type d -path "*/skills/*" -maxdepth 5 2>/dev/null | head -1)
+echo "API Scout at: $TOOL_DIR"
 ```
 
 ## Available Profiles
