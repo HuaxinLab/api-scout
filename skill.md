@@ -179,13 +179,59 @@ Read $TOOL_DIR/captures/{domain}_{timestamp}.json   ← everything, including ra
 - **Section 1 — Authentication Analysis**: Detected cookies, auth headers, signature params
 - **Section 2 — Request Timeline**: Chronological list of all captured API calls with status and category
 - **Section 3 — Endpoint Details**: Per-endpoint breakdown with headers, query params, request body, response body samples
+- **Section 4 — WebSocket Connections**: WS connections with message samples (direction, payload, size) — only present if WebSocket traffic was captured
 
 **Report JSON structure:**
-- `meta`: Capture metadata (profile, timestamp, counts)
+- `meta`: Capture metadata (profile, timestamp, counts, `total_ws_messages`)
 - `profile`: The full profile config used
 - `auth_analysis`: Detected auth patterns
 - `endpoints`: Endpoint → call count mapping
-- `records[]`: Array of every captured request (credentials masked)
+- `records[]`: Array of every captured HTTP request (credentials masked)
+- `ws_records[]`: Array of every WebSocket message (conn_id, direction, payload)
+
+**SSE responses** are auto-parsed into structured summaries instead of being truncated. Look for `response_body._sse_summary == true`:
+```json
+{
+  "_sse_summary": true,
+  "total_events": 15,
+  "event_counts": {"SSE_HEARTBEAT": 1, "STREAM_CHUNK": 12, "SSE_REPLY_END": 2},
+  "sample_events": [{"event": "STREAM_CHUNK", "data": {"seq_no": 1, ...}}, ...]
+}
+```
+
+### Existing API Specs and Examples
+
+Before running a new capture, check if specs or examples already exist:
+
+```bash
+ls $TOOL_DIR/reports/*_api_spec.md    # compiled API specifications
+ls $TOOL_DIR/examples/                # working API client scripts
+```
+
+**Available API Specs:**
+| File | Site |
+|------|------|
+| `reports/www_doubao_com_api_spec.md` | 豆包 — chat/image/video, auth, anti-scraping |
+| `reports/jimeng_jianying_com_api_spec.md` | 即梦 — video generation, open-source project comparison |
+| `reports/xyq_jianying_com_api_spec.md` | 小云雀 — agent-based video generation |
+
+**Available Examples:**
+| File | Description |
+|------|-------------|
+| `examples/doubao_chat_test.py` | 豆包聊天 (pure HTTP, streaming SSE, supports 4 cookie formats via `--cookie`) |
+
+When the user asks to use an existing API, read the spec + example first instead of re-capturing.
+
+### Running Tests
+
+After modifying any core logic in `tools/api_capture.py`, run tests:
+
+```bash
+cd $TOOL_DIR && source .venv/bin/activate
+python -m pytest tests/ -v
+```
+
+53 tests cover: profile loading, path matching, request filtering, body/SSE processing, path normalization, auth detection, endpoint grouping, credential extraction, sanitization, markdown generation.
 
 ### Step 4: Analyze and Report
 
