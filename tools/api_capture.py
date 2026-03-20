@@ -534,6 +534,7 @@ async def run_capture(profile: dict, url_override: str | None, filter_override: 
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
+                "--start-maximized",
             ],
         )
         context = await browser.new_context(
@@ -542,7 +543,7 @@ async def run_capture(profile: dict, url_override: str | None, filter_override: 
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/131.0.0.0 Safari/537.36"
             ),
-            viewport={"width": 1440, "height": 900},
+            no_viewport=True,
             locale="zh-CN",
         )
 
