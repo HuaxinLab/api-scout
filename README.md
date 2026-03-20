@@ -9,8 +9,13 @@
 ```
 api-scout/
 ├── skill.md                 ← 通用 Skill 定义（可迁移给任何 agent）
-├── requirements.txt         ← 依赖（仅 playwright）
+├── requirements.txt
 ├── .gitignore
+├── profiles/                ← 站点配置
+│   ├── _default.yaml        ← 通用兜底
+│   ├── doubao.yaml          ← 豆包 AI 对话
+│   ├── jimeng.yaml          ← 即梦 AI 视频生成
+│   └── xyq.yaml             ← 小云雀 AI 视频
 ├── tools/
 │   └── api_capture.py       ← 核心抓包脚本
 └── captures/                ← 输出目录（自动创建，已 gitignore）
@@ -27,54 +32,110 @@ playwright install chromium
 
 ## 使用
 
-### 方式一：独立脚本
+### 方式一：使用预置 Profile（推荐）
 
 ```bash
-# 指定起始 URL
-python tools/api_capture.py --url "https://www.doubao.com"
+# 豆包 — 自动过滤埋点噪音，分类 chat/im/skill 等 API
+python tools/api_capture.py --profile doubao
 
-# 只抓特定域名的请求
-python tools/api_capture.py --url "https://www.doubao.com" --filter "doubao.com"
+# 即梦 — 分类 generate/poll/upload/download API
+python tools/api_capture.py --profile jimeng
 
-# 不指定 URL，打开空白页自己导航
+# 小云雀
+python tools/api_capture.py --profile xyq
+```
+
+Profile 预置了目标 URL、域名过滤、噪音路径过滤、API 分类和已知认证模式。
+
+### 方式二：自定义参数
+
+```bash
+# 指定 URL，不用 profile
+python tools/api_capture.py --url "https://www.example.com"
+
+# 指定 URL + 域名过滤
+python tools/api_capture.py --url "https://www.example.com" --filter "example.com"
+
+# Profile + URL 覆盖
+python tools/api_capture.py --profile doubao --url "https://www.doubao.com/chat/special"
+
+# 空白页，自己导航
 python tools/api_capture.py
 ```
 
-浏览器弹出后：
+### CLI 参数
 
-1. 登录目标网站（如需要）
-2. 执行你想抓取的完整操作流程（如：提交任务 → 等待结果 → 下载）
-3. **关闭浏览器**结束抓包
+| 参数 | 缩写 | 说明 |
+|------|------|------|
+| `--profile` | `-p` | Profile 名称，加载 `profiles/<name>.yaml` |
+| `--url` | `-u` | 起始 URL，覆盖 profile 中的 url |
+| `--filter` | `-f` | 域名过滤，覆盖 profile 中的 filter_domains |
 
-脚本会在 `captures/` 下生成两个文件：
+### 操作流程
 
-- `{domain}_{timestamp}.json` — 完整结构化数据（所有请求/响应详情）
-- `{domain}_{timestamp}.md` — 可读的分析报告（认证分析、端点列表、请求示例）
+1. 运行命令，浏览器弹出
+2. 登录目标网站（如需要）
+3. 执行你想抓取的完整操作流程
+4. **关闭浏览器**结束抓包
+5. 查看 `captures/` 下生成的 JSON 和 Markdown 报告
 
-### 方式二：通过 Skill 接入 AI Agent
+## 输出文件
 
-将 `skill.md` 配置到 Claude Code 或其他兼容 agent 中，使用 `/api-scout <url>` 触发。
+每次抓包生成两个文件：
 
-Skill 工作流：
+| 文件 | 内容 |
+|------|------|
+| `{domain}_{timestamp}.json` | 完整数据：每个请求的 headers、body、响应、时序 |
+| `{domain}_{timestamp}.md` | 可读报告：认证分析、API 分类、请求时间线、端点详情 |
 
-1. **抓包** — 运行 `api_capture.py`，用户手动操作浏览器
-2. **分析** — AI 读取输出文件，自动识别认证机制、API 端点、签名算法、反爬特征
-3. **输出** — 生成结构化的 API 分析报告 + 实现建议
-4. **开发**（可选）— 根据分析结果辅助生成 API 客户端代码
+### Markdown 报告结构
 
-## 抓包脚本功能
+- **Section 0 — API Categories**：按 profile 定义的分类归组端点
+- **Section 1 — Authentication Analysis**：检测到的 Cookie、签名 Header、认证参数
+- **Section 2 — Request Timeline**：按时间排列的请求列表，含状态码和分类标签
+- **Section 3 — Endpoint Details**：每个端点的 headers、参数、请求体、响应体示例
 
-- 自动过滤静态资源（图片/字体/CSS/JS），只保留 API 请求
-- JSON 请求体/响应体自动解析
-- 大 body（>50KB）自动截断，二进制内容标记跳过
-- 相似端点自动归组（路径中的 ID/UUID/Hash 替换为占位符）
-- 认证模式自动检测（Cookie、Authorization、自定义签名 Header、Query 参数）
-- 实时输出捕获的请求列表
+## Profile 配置
 
-## 输出报告内容
+Profile 是一个 YAML 文件，定义如何抓包和分析特定站点：
 
-Markdown 报告包含：
+```yaml
+name: 站点名称
+description: 一句话描述
+url: https://www.example.com
 
-1. **认证分析** — Session Cookie、Auth Header、签名 Header、认证相关 Query 参数
-2. **请求时间线** — 按时间顺序的完整 API 调用列表
-3. **端点详情** — 每个端点的请求头、请求体、响应体示例
+filter_domains:           # 只抓这些域名（空 = 全抓）
+  - example.com
+
+ignore_paths:             # 过滤噪音路径（支持尾部 * 通配）
+  - /analytics/*
+  - /tracking/*
+
+ignore_domains: []        # 完全忽略的域名
+
+api_categories:           # API 分类
+  auth:
+    - /api/login
+    - /api/token
+  core:
+    - /api/chat/*
+
+auth_hints:               # 已知的认证字段
+  query_params: [msToken, a_bogus]
+  cookies: [sessionid, sid_tt]
+  headers: [Sign, Device-Time]
+```
+
+### 新建 Profile
+
+1. 先不用 profile 跑一次，观察有哪些噪音和 API
+2. 基于观察结果创建 `profiles/<name>.yaml`
+3. 用新 profile 重新跑，验证过滤和分类效果
+
+## 作为 Skill 使用
+
+将 `skill.md` 复制到 agent 的 skill/command 目录（如 `~/.claude/commands/api-scout.md`），即可通过 `/api-scout` 触发。
+
+Skill 会引导 agent 完成：抓包 → 读取结果 → 分析认证/反爬/端点 → 输出实现方案 → 辅助代码开发。
+
+详见 [skill.md](skill.md) 中的完整工作流定义。

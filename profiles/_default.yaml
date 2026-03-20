@@ -1,0 +1,20 @@
+name: default
+description: 通用默认配置，不做特殊过滤
+
+# 不指定 url，打开空白页
+url: ""
+
+# 不限制域名
+filter_domains: []
+
+# 通用噪音过滤
+ignore_paths:
+  - /favicon.ico
+  - /robots.txt
+  - /sitemap.xml
+
+ignore_domains: []
+
+api_categories: {}
+
+auth_hints: {}

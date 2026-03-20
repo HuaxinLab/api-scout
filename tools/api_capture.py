@@ -4,23 +4,30 @@ Launches a visible browser, captures all API requests while you manually
 operate any website, then outputs structured JSON + Markdown summary.
 
 Usage:
-    python tools/api_capture.py --url "https://www.doubao.com"
+    python tools/api_capture.py --profile doubao
+    python tools/api_capture.py --profile jimeng
     python tools/api_capture.py --url "https://example.com" --filter "example.com"
-    python tools/api_capture.py  # opens blank page
+    python tools/api_capture.py  # opens blank page, default profile
 """
 
 import argparse
 import json
 import re
-import sys
 import time
 from datetime import datetime
+from fnmatch import fnmatch
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-# ─── Config ──────────────────────────────────────────────────────────
+import yaml
 
-MAX_BODY_SIZE = 50 * 1024  # 50KB, truncate beyond this
+# ─── Constants ───────────────────────────────────────────────────────
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROFILES_DIR = PROJECT_ROOT / "profiles"
+CAPTURES_DIR = PROJECT_ROOT / "captures"
+
+MAX_BODY_SIZE = 50 * 1024  # 50KB
 SKIP_RESOURCE_TYPES = {"image", "font", "stylesheet", "media", "manifest", "other"}
 SKIP_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".avif",
@@ -28,30 +35,105 @@ SKIP_EXTENSIONS = {
     ".css", ".map",
     ".mp3", ".mp4", ".webm", ".ogg", ".wav",
 }
-API_CONTENT_TYPES = {"json", "text", "form", "protobuf", "grpc", "xml", "html"}
+API_CONTENT_TYPES = {"json", "text", "form", "protobuf", "grpc", "xml"}
+
+
+# ─── Profile ─────────────────────────────────────────────────────────
+
+def load_profile(name: str | None) -> dict:
+    """Load a YAML profile by name. Falls back to _default."""
+    if name:
+        path = PROFILES_DIR / f"{name}.yaml"
+        if not path.exists():
+            print(f"Profile '{name}' not found at {path}, using _default")
+            name = None
+
+    if not name:
+        path = PROFILES_DIR / "_default.yaml"
+
+    if not path.exists():
+        return {"name": "default", "ignore_paths": [], "ignore_domains": [],
+                "filter_domains": [], "api_categories": {}, "auth_hints": {}}
+
+    with open(path, encoding="utf-8") as f:
+        profile = yaml.safe_load(f) or {}
+
+    # Normalize lists
+    for key in ("ignore_paths", "ignore_domains", "filter_domains"):
+        if key not in profile:
+            profile[key] = []
+
+    if "api_categories" not in profile:
+        profile["api_categories"] = {}
+    if "auth_hints" not in profile:
+        profile["auth_hints"] = {}
+
+    return profile
+
+
+def path_matches_patterns(path: str, patterns: list[str]) -> bool:
+    """Check if a URL path matches any of the ignore patterns (supports * glob)."""
+    for pattern in patterns:
+        if pattern.endswith("*"):
+            if path.startswith(pattern[:-1]):
+                return True
+        elif fnmatch(path, pattern):
+            return True
+        elif path == pattern or path.rstrip("/") == pattern.rstrip("/"):
+            return True
+    return False
+
+
+def categorize_path(path: str, categories: dict[str, list[str]]) -> str | None:
+    """Return the category name for a path, or None."""
+    for cat_name, patterns in categories.items():
+        if path_matches_patterns(path, patterns):
+            return cat_name
+    return None
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────
 
-def is_api_request(url: str, content_type: str | None, resource_type: str) -> bool:
+def is_api_request(url: str, content_type: str | None, resource_type: str,
+                   profile: dict) -> bool:
     """Determine if a request is an API call (not a static resource)."""
     if resource_type in SKIP_RESOURCE_TYPES:
         return False
+
     parsed = urlparse(url)
+
+    # Profile: filter_domains — if set, only keep requests to these domains
+    if profile["filter_domains"]:
+        if not any(d in parsed.netloc for d in profile["filter_domains"]):
+            return False
+
+    # Profile: ignore_domains
+    if any(d in parsed.netloc for d in profile["ignore_domains"]):
+        return False
+
+    # Profile: ignore_paths
+    if path_matches_patterns(parsed.path, profile["ignore_paths"]):
+        return False
+
     suffix = Path(parsed.path).suffix.lower()
     if suffix in SKIP_EXTENSIONS:
         return False
-    # Keep everything that looks like an API call
+
+    # XHR/Fetch are always API calls
     if resource_type in ("xhr", "fetch"):
         return True
+
     # Check content type
     if content_type:
         ct = content_type.lower()
         if any(t in ct for t in API_CONTENT_TYPES):
             return True
+
     # Keep requests with no extension or common API paths
-    if not suffix or any(p in parsed.path for p in ("/api/", "/v1/", "/v2/", "/mweb/", "/rpc/", "/graphql")):
+    if not suffix or any(p in parsed.path for p in
+                         ("/api/", "/v1/", "/v2/", "/mweb/", "/rpc/", "/graphql")):
         return True
+
     return False
 
 
@@ -92,7 +174,7 @@ def normalize_path(path: str) -> str:
     return "/" + "/".join(normalized)
 
 
-def detect_auth_patterns(records: list[dict]) -> dict:
+def detect_auth_patterns(records: list[dict], profile: dict) -> dict:
     """Analyze captured records to identify authentication patterns."""
     auth_info = {
         "cookie_keys": set(),
@@ -100,7 +182,22 @@ def detect_auth_patterns(records: list[dict]) -> dict:
         "custom_sign_headers": set(),
         "query_auth_params": set(),
     }
-    sign_keywords = {"sign", "token", "key", "auth", "secret", "signature", "nonce", "timestamp", "bogus"}
+
+    # Base keywords + profile hints
+    sign_keywords = {"sign", "token", "key", "auth", "secret", "signature",
+                     "nonce", "timestamp", "bogus"}
+    cookie_keywords = {"session", "token", "sid", "uid", "auth", "login"}
+
+    hints = profile.get("auth_hints", {})
+    if hints.get("query_params"):
+        for p in hints["query_params"]:
+            sign_keywords.add(p.lower())
+    if hints.get("cookies"):
+        for c in hints["cookies"]:
+            cookie_keywords.add(c.lower())
+    if hints.get("headers"):
+        for h in hints["headers"]:
+            sign_keywords.add(h.lower())
 
     for rec in records:
         headers = rec.get("request_headers", {})
@@ -109,9 +206,9 @@ def detect_auth_patterns(records: list[dict]) -> dict:
         if cookie:
             for part in cookie.split(";"):
                 if "=" in part:
-                    name = part.split("=")[0].strip().lower()
-                    if any(k in name for k in ("session", "token", "sid", "uid", "auth", "login")):
-                        auth_info["cookie_keys"].add(part.split("=")[0].strip())
+                    name = part.split("=")[0].strip()
+                    if any(k in name.lower() for k in cookie_keywords):
+                        auth_info["cookie_keys"].add(name)
         # Auth headers
         for key in headers:
             kl = key.lower()
@@ -125,7 +222,6 @@ def detect_auth_patterns(records: list[dict]) -> dict:
             if any(s in kl for s in sign_keywords):
                 auth_info["query_auth_params"].add(key)
 
-    # Convert sets to lists for JSON serialization
     return {k: sorted(v) for k, v in auth_info.items()}
 
 
@@ -142,20 +238,50 @@ def group_endpoints(records: list[dict]) -> dict[str, list[dict]]:
 
 # ─── Markdown Report ─────────────────────────────────────────────────
 
-def generate_markdown(records: list[dict], auth_info: dict, groups: dict, domain: str) -> str:
+def generate_markdown(records: list[dict], auth_info: dict, groups: dict,
+                      profile: dict) -> str:
     """Generate a human-readable Markdown analysis report."""
+    name = profile.get("name", "unknown")
     lines = [
-        f"# API Capture Report — {domain}",
-        f"",
+        f"# API Capture Report — {name}",
+        "",
+        f"Profile: `{profile.get('name', 'default')}`",
         f"Captured at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"Total API requests: {len(records)}",
         f"Unique endpoints: {len(groups)}",
         "",
-        "---",
-        "",
-        "## 1. Authentication Analysis",
-        "",
     ]
+
+    # Categories summary (if profile defines them)
+    categories = profile.get("api_categories", {})
+    if categories:
+        lines += ["---", "", "## 0. API Categories", ""]
+        categorized = {}
+        uncategorized = []
+        for endpoint in groups:
+            method, path = endpoint.split(" ", 1)
+            cat = categorize_path(path, categories)
+            if cat:
+                categorized.setdefault(cat, []).append(endpoint)
+            else:
+                uncategorized.append(endpoint)
+
+        for cat_name, endpoints in categorized.items():
+            lines.append(f"**{cat_name}:**")
+            for ep in endpoints:
+                count = len(groups[ep])
+                lines.append(f"- `{ep}` ({count} calls)")
+            lines.append("")
+
+        if uncategorized:
+            lines.append("**uncategorized:**")
+            for ep in uncategorized:
+                count = len(groups[ep])
+                lines.append(f"- `{ep}` ({count} calls)")
+            lines.append("")
+
+    # Auth analysis
+    lines += ["---", "", "## 1. Authentication Analysis", ""]
 
     if auth_info["cookie_keys"]:
         lines.append("**Session Cookies:**")
@@ -182,41 +308,51 @@ def generate_markdown(records: list[dict], auth_info: dict, groups: dict, domain
         lines.append("No obvious authentication patterns detected.")
         lines.append("")
 
+    # Profile hints
+    hints = profile.get("auth_hints", {})
+    if hints:
+        lines += ["**Profile auth hints (known patterns):**"]
+        for k, v in hints.items():
+            if v:
+                lines.append(f"- {k}: {', '.join(f'`{x}`' for x in v)}")
+        lines.append("")
+
     # Timeline
     lines += [
-        "---",
-        "",
-        "## 2. Request Timeline",
-        "",
-        "| # | Method | URL | Status | Size |",
-        "|---|--------|-----|--------|------|",
+        "---", "",
+        "## 2. Request Timeline", "",
+        "| # | Method | URL | Status | Size | Category |",
+        "|---|--------|-----|--------|------|----------|",
     ]
     for i, rec in enumerate(records, 1):
         url_short = rec["path"]
         if len(url_short) > 60:
             url_short = url_short[:57] + "..."
         size = rec.get("response_body_size", "?")
-        lines.append(f"| {i} | {rec['method']} | `{url_short}` | {rec.get('response_status', '?')} | {size} |")
+        cat = categorize_path(rec["path"], categories) or ""
+        lines.append(
+            f"| {i} | {rec['method']} | `{url_short}` | "
+            f"{rec.get('response_status', '?')} | {size} | {cat} |"
+        )
     lines.append("")
 
     # Grouped endpoints
-    lines += [
-        "---",
-        "",
-        "## 3. Endpoint Details",
-        "",
-    ]
+    lines += ["---", "", "## 3. Endpoint Details", ""]
 
     for endpoint, recs in groups.items():
         first = recs[0]
-        lines.append(f"### `{endpoint}`")
-        lines.append(f"")
+        cat = categorize_path(first["path"], categories)
+        cat_label = f" `[{cat}]`" if cat else ""
+
+        lines.append(f"### `{endpoint}`{cat_label}")
+        lines.append("")
         lines.append(f"- Calls: {len(recs)}")
-        lines.append(f"- Example URL: `{first['url'][:120]}`")
+        lines.append(f"- Domain: `{first.get('domain', '?')}`")
+        lines.append(f"- Example URL: `{first['url'][:150]}`")
         lines.append(f"- Response Status: {first.get('response_status', '?')}")
         lines.append("")
 
-        # Request headers (deduplicated, show interesting ones)
+        # Notable headers
         interesting_headers = {}
         skip = {"cookie", "user-agent", "accept", "accept-language", "accept-encoding",
                 "connection", "host", "origin", "referer", "content-length",
@@ -250,7 +386,7 @@ def generate_markdown(records: list[dict], auth_info: dict, groups: dict, domain
             lines.append("```")
             lines.append("")
 
-        # Response body (first 500 chars)
+        # Response body
         if first.get("response_body"):
             lines.append("**Response Body (sample):**")
             lines.append("```json")
@@ -269,21 +405,28 @@ def generate_markdown(records: list[dict], auth_info: dict, groups: dict, domain
 
 # ─── Main Capture Logic ─────────────────────────────────────────────
 
-async def run_capture(url: str | None, domain_filter: str | None):
+async def run_capture(profile: dict, url_override: str | None, filter_override: str | None):
     from playwright.async_api import async_playwright
 
+    url = url_override or profile.get("url")
     records: list[dict] = []
     seq = 0
     start_time = time.time()
 
-    print("\n╔══════════════════════════════════════════════════╗")
-    print("║          API Scout — API Capture Tool            ║")
-    print("╠══════════════════════════════════════════════════╣")
-    print("║  Browser is opening. Please:                     ║")
-    print("║  1. Log in / navigate to the target site         ║")
-    print("║  2. Perform the actions you want to capture      ║")
-    print("║  3. Close the browser when done                  ║")
-    print("╚══════════════════════════════════════════════════╝\n")
+    profile_name = profile.get("name", "default")
+    print(f"\n╔══════════════════════════════════════════════════╗")
+    print(f"║          API Scout — API Capture Tool            ║")
+    print(f"╠══════════════════════════════════════════════════╣")
+    print(f"║  Profile: {profile_name:<39s}║")
+    print(f"║  Browser is opening. Please:                     ║")
+    print(f"║  1. Log in / navigate to the target site         ║")
+    print(f"║  2. Perform the actions you want to capture      ║")
+    print(f"║  3. Close the browser when done                  ║")
+    print(f"╚══════════════════════════════════════════════════╝\n")
+
+    # Apply filter override to profile
+    if filter_override:
+        profile["filter_domains"] = [filter_override]
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -311,22 +454,16 @@ async def run_capture(url: str | None, domain_filter: str | None):
             req_url = request.url
             resource_type = request.resource_type
 
-            # Domain filter
-            if domain_filter:
-                parsed = urlparse(req_url)
-                if domain_filter not in parsed.netloc:
-                    return
-
-            # Get response content type
+            # Get content types
             resp_ct = None
             try:
                 resp_ct = response.headers.get("content-type", "")
             except Exception:
                 pass
-
-            # Check if this is an API request
             req_ct = request.headers.get("content-type", "")
-            if not is_api_request(req_url, resp_ct or req_ct, resource_type):
+
+            # Apply profile-aware filtering
+            if not is_api_request(req_url, resp_ct or req_ct, resource_type, profile):
                 return
 
             seq += 1
@@ -358,7 +495,8 @@ async def run_capture(url: str | None, domain_filter: str | None):
                 "url": req_url,
                 "path": parsed.path,
                 "normalized_path": normalize_path(parsed.path),
-                "query_params": {k: v[0] if len(v) == 1 else v for k, v in parse_qs(parsed.query).items()},
+                "query_params": {k: v[0] if len(v) == 1 else v
+                                 for k, v in parse_qs(parsed.query).items()},
                 "domain": parsed.netloc,
                 "resource_type": resource_type,
                 "request_headers": dict(request.headers),
@@ -368,11 +506,20 @@ async def run_capture(url: str | None, domain_filter: str | None):
                 "response_body": resp_body,
                 "response_body_size": resp_body_size,
             }
+
+            # Add category if profile defines one
+            categories = profile.get("api_categories", {})
+            cat = categorize_path(parsed.path, categories)
+            if cat:
+                record["category"] = cat
+
             records.append(record)
 
             # Live output
             status_icon = "✓" if 200 <= response.status < 400 else "✗"
-            print(f"  [{seq:3d}] {status_icon} {request.method:6s} {response.status} {parsed.path[:80]}")
+            cat_str = f" [{cat}]" if cat else ""
+            print(f"  [{seq:3d}] {status_icon} {request.method:6s} {response.status} "
+                  f"{parsed.path[:70]}{cat_str}")
 
         page.on("response", on_response)
 
@@ -404,39 +551,41 @@ async def run_capture(url: str | None, domain_filter: str | None):
     return records
 
 
-def save_results(records: list[dict], url: str | None):
+def save_results(records: list[dict], profile: dict, url: str | None):
     """Save capture results to JSON and Markdown files."""
     if not records:
         print("\nNo API requests captured.")
         return None, None
 
     # Determine output filenames
-    domain = "unknown"
+    profile_name = profile.get("name", "unknown")
+    domain = profile_name
     if url:
         domain = urlparse(url).netloc.replace(".", "_").replace(":", "_")
     elif records:
         domain = urlparse(records[0]["url"]).netloc.replace(".", "_").replace(":", "_")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = Path(__file__).resolve().parent.parent / "captures"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
 
-    json_path = out_dir / f"{domain}_{timestamp}.json"
-    md_path = out_dir / f"{domain}_{timestamp}.md"
+    json_path = CAPTURES_DIR / f"{domain}_{timestamp}.json"
+    md_path = CAPTURES_DIR / f"{domain}_{timestamp}.md"
 
     # Analysis
-    auth_info = detect_auth_patterns(records)
+    auth_info = detect_auth_patterns(records, profile)
     groups = group_endpoints(records)
 
     # Save JSON
     output = {
         "meta": {
             "captured_at": datetime.now().isoformat(),
-            "url": url,
+            "profile": profile_name,
+            "url": url or profile.get("url"),
             "domain": domain,
             "total_requests": len(records),
             "unique_endpoints": len(groups),
         },
+        "profile": profile,
         "auth_analysis": auth_info,
         "endpoints": {k: len(v) for k, v in groups.items()},
         "records": records,
@@ -444,11 +593,11 @@ def save_results(records: list[dict], url: str | None):
     json_path.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # Save Markdown
-    md_content = generate_markdown(records, auth_info, groups, domain)
+    md_content = generate_markdown(records, auth_info, groups, profile)
     md_path.write_text(md_content, encoding="utf-8")
 
     print(f"\n{'='*50}")
-    print(f"Capture complete!")
+    print(f"Capture complete! (profile: {profile_name})")
     print(f"  Requests: {len(records)}")
     print(f"  Endpoints: {len(groups)}")
     print(f"  JSON: {json_path}")
@@ -460,13 +609,17 @@ def save_results(records: list[dict], url: str | None):
 
 def main():
     parser = argparse.ArgumentParser(description="API Scout — Universal API Capture Tool")
-    parser.add_argument("--url", "-u", help="Starting URL to navigate to")
-    parser.add_argument("--filter", "-f", help="Only capture requests matching this domain")
+    parser.add_argument("--profile", "-p", help="Profile name (loads profiles/<name>.yaml)")
+    parser.add_argument("--url", "-u", help="Starting URL (overrides profile url)")
+    parser.add_argument("--filter", "-f", help="Domain filter (overrides profile filter_domains)")
     args = parser.parse_args()
 
+    profile = load_profile(args.profile)
+    url = args.url or profile.get("url")
+
     import asyncio
-    records = asyncio.run(run_capture(args.url, args.filter))
-    save_results(records, args.url)
+    records = asyncio.run(run_capture(profile, args.url, args.filter))
+    save_results(records, profile, url)
 
 
 if __name__ == "__main__":

@@ -3,105 +3,276 @@ name: api-scout
 description: Capture and reverse-engineer any website's API. Launches a browser for manual operation, records all API traffic, then analyzes auth patterns, endpoints, and anti-scraping mechanisms to produce an implementation plan.
 ---
 
-# API Scout — Web API Reverse Engineering
+# API Scout — Web API Reverse Engineering Skill
 
 You are an API reverse engineering assistant. Your job is to help the user capture, analyze, and understand any website's internal API, then produce actionable implementation guidance.
 
-## Workflow
+## Tool Location
 
-### Step 1: Run the capture tool
+The api-scout tool lives at a fixed path. All commands below assume this base:
 
-Run the API capture script. The user will operate the browser manually.
-
-```bash
-cd {{PROJECT_DIR}}
-source .venv/bin/activate 2>/dev/null || python3 -m venv .venv && source .venv/bin/activate && pip install playwright -q && playwright install chromium -q
-python tools/api_capture.py --url "$URL" $( [ -n "$FILTER" ] && echo "--filter $FILTER" )
+```
+TOOL_DIR=/Users/acusp/Projects/acusp/skills/api-scout
 ```
 
-- `$URL` is the argument passed by the user (e.g., `https://www.doubao.com`)
-- `$FILTER` is an optional domain filter the user may provide
-- The script launches a **visible** browser. Tell the user to:
-  1. Log in if needed
-  2. Perform the full workflow they want to reverse-engineer (e.g., submit a task, wait for result, download)
-  3. **Close the browser** when done
-- The script outputs two files in `captures/`:
-  - `{domain}_{timestamp}.json` — full structured data
-  - `{domain}_{timestamp}.md` — human-readable summary
+## Available Profiles
 
-### Step 2: Read and analyze the output
+Pre-configured profiles live in `$TOOL_DIR/profiles/`. Each profile defines URL, domain filters, noise paths to ignore, API categories, and known auth patterns.
 
-After the capture finishes, read **both** output files. Then perform a deep analysis covering:
+| Profile | File | Target |
+|---------|------|--------|
+| `doubao` | `profiles/doubao.yaml` | 豆包 AI 对话 (doubao.com) |
+| `jimeng` | `profiles/jimeng.yaml` | 即梦 AI 视频生成 (jimeng.jianying.com) |
+| `xyq` | `profiles/xyq.yaml` | 小云雀 AI 视频 (xyq.jianying.com) |
+| (none) | `profiles/_default.yaml` | 通用兜底，不做特殊过滤 |
 
-#### 2a. Authentication Mechanism
-- What session/auth cookies are used? (e.g., `sessionid`, `token`, `sid_tt`)
-- Is there an `Authorization` header? What format? (Bearer, Basic, custom)
-- Are there custom signature headers? (e.g., `Sign`, `X-Sign`, `X-Bogus`)
-- Are there auth-related query parameters? (e.g., `a_bogus`, `msToken`, `_signature`)
+You can also create new profiles — see "Creating a New Profile" section below.
 
-#### 2b. Signature / Anti-Scraping Analysis
-- Look for headers or params that change across requests to the same endpoint
-- Look for timestamps paired with hashes (common sign pattern)
-- Check if any params look like browser fingerprints (long encoded strings)
-- Determine: can these be reproduced in pure HTTP, or do they require a real browser environment?
+---
 
-#### 2c. API Endpoint Map
+## Workflow
+
+### Step 1: Environment Setup (first run only)
+
+```bash
+cd $TOOL_DIR
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt -q
+playwright install chromium
+```
+
+If `.venv` already exists, only activate it:
+
+```bash
+cd $TOOL_DIR && source .venv/bin/activate
+```
+
+### Step 2: Run the Capture
+
+Choose ONE of the following based on user input:
+
+**A) With a known profile (recommended):**
+```bash
+python tools/api_capture.py --profile <profile_name>
+```
+Example: `python tools/api_capture.py --profile doubao`
+
+The profile provides the URL, filters, and categories automatically.
+
+**B) With a profile + URL override:**
+```bash
+python tools/api_capture.py --profile <profile_name> --url "https://custom.url.com"
+```
+
+**C) With a raw URL (no profile):**
+```bash
+python tools/api_capture.py --url "https://www.example.com"
+```
+
+**D) With a raw URL + domain filter:**
+```bash
+python tools/api_capture.py --url "https://www.example.com" --filter "example.com"
+```
+
+**E) Blank page (user navigates manually):**
+```bash
+python tools/api_capture.py
+```
+
+#### CLI Arguments Reference
+
+| Arg | Short | Description |
+|-----|-------|-------------|
+| `--profile` | `-p` | Profile name (loads `profiles/<name>.yaml`) |
+| `--url` | `-u` | Starting URL (overrides profile's `url` field) |
+| `--filter` | `-f` | Only capture requests to domains containing this string (overrides profile's `filter_domains`) |
+
+#### What to Tell the User
+
+After running the command, a visible Chromium browser window will open. Tell the user:
+
+> Browser is opening. Please:
+> 1. **Log in** to the target site if needed
+> 2. **Perform the complete workflow** you want to reverse-engineer
+>    (e.g., start a chat, generate a video, upload a file, etc.)
+> 3. **Close the browser window** when done — this ends the capture
+
+**Important:** The capture runs with a 10-minute timeout by default. For long workflows, warn the user to work efficiently.
+
+#### Output Files
+
+When the browser closes, two files are saved to `$TOOL_DIR/captures/`:
+
+| File | Content |
+|------|---------|
+| `{domain}_{timestamp}.json` | Full structured data: every request/response with headers, bodies, timing |
+| `{domain}_{timestamp}.md` | Human-readable report: auth analysis, timeline, endpoint details |
+
+The script prints the exact file paths at the end. Use these paths in the next step.
+
+### Step 3: Read the Output
+
+Read **both** output files:
+
+```
+Read $TOOL_DIR/captures/{domain}_{timestamp}.md    ← start here for overview
+Read $TOOL_DIR/captures/{domain}_{timestamp}.json  ← dig into specific requests
+```
+
+The Markdown report contains:
+- **Section 0 — API Categories**: Endpoints grouped by category (only if profile defines categories)
+- **Section 1 — Authentication Analysis**: Detected cookies, auth headers, signature params
+- **Section 2 — Request Timeline**: Chronological list of all captured API calls with status and category
+- **Section 3 — Endpoint Details**: Per-endpoint breakdown with headers, query params, request body, response body samples
+
+The JSON file contains:
+- `meta`: Capture metadata (profile, timestamp, counts)
+- `profile`: The full profile config used
+- `auth_analysis`: Detected auth patterns
+- `endpoints`: Endpoint → call count mapping
+- `records[]`: Array of every captured request with full details
+
+### Step 4: Analyze and Report
+
+Perform a deep analysis covering these areas:
+
+#### 4a. Authentication Mechanism
+- What session/auth cookies are used? (look at `auth_analysis.cookie_keys`)
+- Is there an `Authorization` header?
+- Are there custom signature headers? (e.g., `Sign`, `Device-Time`)
+- Are there auth-related query parameters? (e.g., `a_bogus`, `msToken`)
+- How are sessions established? (look at init-category requests)
+
+#### 4b. Signature / Anti-Scraping Analysis
+- Compare the same endpoint across multiple calls — do `a_bogus`, `msToken`, or `Sign` values change?
+- If values change per-request: likely generated dynamically (may need browser)
+- If values are static per-session: can be extracted once and reused
+- Look for timestamp + hash patterns (e.g., `Sign = MD5(salt + uri + timestamp)`)
+- Long base64-like strings in query params (e.g., `a_bogus`) usually indicate browser-generated fingerprints
+
+**Verdict categories:**
+- **Pure HTTP feasible**: Simple or no anti-scraping, reproducible signatures
+- **Browser required**: Dynamic browser fingerprint tokens (a_bogus, msToken) that can't be computed server-side
+- **Hybrid**: Most endpoints work via HTTP, but specific ones (e.g., task submission) need browser
+
+#### 4c. API Endpoint Map
 For each unique endpoint, document:
 - HTTP method + path
-- Purpose (inferred from path name, request/response content)
-- Required headers
-- Request body structure (with field types)
-- Response body structure (key fields)
-- Whether it has anti-scraping protection
+- Purpose (inferred from path name, request/response content, and category)
+- Required headers (especially non-standard ones)
+- Request body structure with field types
+- Response body structure with key fields
+- Anti-scraping status (pure HTTP / browser required)
 
-#### 2d. Request Flow
-- Identify the logical order of API calls (e.g., get token → upload → submit → poll → download)
-- Identify dependencies between calls (e.g., response from call A provides a parameter for call B)
-- Draw a flow diagram in text/mermaid format
+#### 4d. Request Flow
+- Identify the logical call sequence (e.g., `init → auth → submit → poll → download`)
+- Identify data dependencies (e.g., `webid` response provides `web_id` used in all subsequent calls)
+- Present as a numbered list or mermaid diagram
 
-### Step 3: Output the analysis report
+### Step 5: Present the Report
 
-Present a structured report to the user:
+Output a structured report:
 
 ```markdown
-## API Analysis Report — {domain}
+## API Analysis Report — {site name}
 
 ### Summary
 - Total endpoints: N
-- Auth method: [cookie/token/signature/...]
-- Anti-scraping: [none/simple sign/browser-required/...]
+- Auth method: [cookie / token / signature / ...]
+- Anti-scraping: [none / simple sign / browser-required for X]
+- Profile used: {profile_name}
 
 ### Authentication
-[Details from 2a]
+[Details from 4a — which cookies, headers, params are required]
 
 ### Anti-Scraping
-[Details from 2b]
-Verdict: [Pure HTTP feasible / Browser required for endpoint X]
+[Details from 4b]
+**Verdict:** [Pure HTTP feasible / Browser required for endpoint X / Hybrid]
 
 ### API Flow
-[Mermaid diagram or numbered steps from 2d]
+[Numbered steps or mermaid diagram from 4d]
 
 ### Endpoint Reference
-[Table or detailed list from 2c]
+[Table from 4c]
+| Method | Path | Purpose | Auth | Anti-Scraping |
+|--------|------|---------|------|---------------|
+| POST | /chat/completion | Send message | cookie + msToken | a_bogus (browser) |
+| ... | ... | ... | ... | ... |
 
 ### Implementation Recommendations
-- Which endpoints can be called with pure HTTP (httpx/requests)
-- Which endpoints need browser automation (Playwright)
-- Suggested implementation order
-- Known risks or rate-limiting patterns observed
+1. Which endpoints can be called with pure HTTP (httpx/requests)
+2. Which endpoints need browser automation (Playwright)
+3. Suggested implementation order
+4. Known risks: rate limiting patterns, token expiry, content filtering
 ```
 
-### Step 4: Assist with implementation (if requested)
+### Step 6: Assist with Implementation (if requested)
 
-If the user wants to proceed with building an API client:
-- Generate a Python client class skeleton based on the discovered endpoints
-- Implement signature/auth logic if the algorithm is identifiable
-- Set up the browser automation for endpoints that require it
-- Write polling/retry logic for async task patterns
+If the user wants to build an API client based on the analysis:
 
-## Notes
+1. **Generate a Python client class** with methods for each discovered endpoint
+2. **Implement signature/auth logic** if the algorithm is identifiable from the captured data
+3. **Set up Playwright browser automation** for endpoints that require it
+4. **Write polling/retry logic** for async task patterns (submit → poll → download)
+5. **Create a new profile** if the user plans to capture more from this site
 
-- Always respect the captured data — do not guess endpoint behavior, base analysis on actual captured requests/responses
-- If the capture has too few requests, suggest the user re-run and perform more actions
-- If auth tokens appear in the output, warn the user that the capture file contains sensitive credentials
-- The JSON output is the source of truth; the Markdown is a convenience summary
+---
+
+## Creating a New Profile
+
+When analyzing a new site, or when the user asks to add a profile, create a YAML file in `$TOOL_DIR/profiles/`:
+
+```yaml
+name: 站点名称 (domain)
+description: One-line description
+
+url: https://www.example.com
+
+# Only capture requests to these domains (empty = capture all)
+filter_domains:
+  - example.com
+
+# Paths to ignore (supports trailing * glob)
+ignore_paths:
+  - /analytics/*
+  - /tracking/*
+  - /static/*
+
+# Domains to ignore entirely
+ignore_domains:
+  - google-analytics.com
+
+# Group endpoints into categories for the report
+api_categories:
+  auth:
+    - /api/login
+    - /api/token
+  core:
+    - /api/chat/*
+    - /api/generate/*
+  poll:
+    - /api/status/*
+
+# Known auth patterns to highlight in analysis
+auth_hints:
+  query_params: []
+  cookies: [sessionid]
+  headers: [Authorization]
+```
+
+**Profile design tips:**
+- `ignore_paths`: Add high-frequency noise paths (telemetry, analytics, AB test configs) discovered during first capture
+- `api_categories`: Group by business function (auth, core action, polling, upload, etc.)
+- `auth_hints`: Pre-fill known auth field names so the analysis highlights them even if naming is non-standard
+- Run a capture WITHOUT a profile first, then create the profile based on what you see
+
+---
+
+## Important Notes
+
+- **Trust captured data only** — do not guess endpoint behavior, base all analysis on actual requests/responses
+- **Sensitive data warning** — capture files contain cookies, tokens, and session IDs. Warn the user if they plan to share or commit these files
+- **Too few requests?** — if the capture has < 5 API requests, suggest re-running with more thorough manual operation
+- **Large responses truncated** — bodies > 50KB are truncated in the JSON. If a specific response needs full content, the user should re-capture or use browser DevTools
+- **Profile mismatch** — if a profile filters too aggressively (missing expected requests), suggest running without `filter_domains` or with `--filter` override to debug
+- **The JSON is the source of truth** — the Markdown is a convenience summary. Always refer to JSON for exact header values, full query params, etc.
