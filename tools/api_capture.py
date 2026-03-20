@@ -395,9 +395,10 @@ def sanitize_record(rec: dict) -> dict:
 # ─── Markdown Report ─────────────────────────────────────────────────
 
 def generate_markdown(records: list[dict], auth_info: dict, groups: dict,
-                      profile: dict) -> str:
+                      profile: dict, ws_records: list[dict] | None = None) -> str:
     """Generate a human-readable Markdown analysis report."""
     name = profile.get("name", "unknown")
+    ws_records = ws_records or []
     lines = [
         f"# API Capture Report — {name}",
         "",
@@ -405,6 +406,7 @@ def generate_markdown(records: list[dict], auth_info: dict, groups: dict,
         f"Captured at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"Total API requests: {len(records)}",
         f"Unique endpoints: {len(groups)}",
+        f"WebSocket messages: {len(ws_records)}",
         "",
     ]
 
@@ -556,6 +558,49 @@ def generate_markdown(records: list[dict], auth_info: dict, groups: dict,
         lines.append("---")
         lines.append("")
 
+    # WebSocket section
+    if ws_records:
+        lines += ["## 4. WebSocket Connections", ""]
+
+        # Group by conn_id
+        ws_by_conn: dict[int, list[dict]] = {}
+        for wr in ws_records:
+            cid = wr["conn_id"]
+            ws_by_conn.setdefault(cid, []).append(wr)
+
+        for conn_id, msgs in ws_by_conn.items():
+            first = msgs[0]
+            sent = sum(1 for m in msgs if m["direction"] == "sent")
+            recv = sum(1 for m in msgs if m["direction"] == "received")
+            lines.append(f"### WebSocket #{conn_id}")
+            lines.append("")
+            lines.append(f"- URL: `{first['url'][:150]}`")
+            lines.append(f"- Domain: `{first['domain']}`")
+            lines.append(f"- Messages: {len(msgs)} ({sent} sent, {recv} received)")
+            lines.append("")
+
+            # Show first 10 messages as samples
+            lines.append("**Sample Messages:**")
+            lines.append("")
+            lines.append("| # | Dir | Size | Payload (preview) |")
+            lines.append("|---|-----|------|-------------------|")
+            for msg in msgs[:10]:
+                direction = "→ SENT" if msg["direction"] == "sent" else "← RECV"
+                size = msg.get("payload_size", 0)
+                payload = msg.get("payload", "")
+                if isinstance(payload, dict):
+                    preview = json.dumps(payload, ensure_ascii=False)[:80]
+                else:
+                    preview = str(payload)[:80]
+                preview = preview.replace("|", "\\|")
+                lines.append(f"| {msg['ws_seq']} | {direction} | {size} | `{preview}` |")
+
+            if len(msgs) > 10:
+                lines.append(f"| ... | ... | ... | *{len(msgs) - 10} more messages* |")
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+
     return "\n".join(lines)
 
 
@@ -566,7 +611,9 @@ async def run_capture(profile: dict, url_override: str | None, filter_override: 
 
     url = url_override or profile.get("url")
     records: list[dict] = []
+    ws_records: list[dict] = []
     seq = 0
+    ws_seq = 0
     start_time = time.time()
 
     profile_name = profile.get("name", "default")
@@ -680,6 +727,68 @@ async def run_capture(profile: dict, url_override: str | None, filter_override: 
 
         page.on("response", on_response)
 
+        # WebSocket capture
+        def on_websocket(ws):
+            nonlocal ws_seq
+            ws_url = ws.url
+            parsed_ws = urlparse(ws_url)
+
+            # Apply domain filter
+            if profile["filter_domains"]:
+                if not any(d in parsed_ws.netloc for d in profile["filter_domains"]):
+                    return
+
+            ws_seq += 1
+            conn_id = ws_seq
+            print(f"  [WS {conn_id}] Connected: {parsed_ws.netloc}{parsed_ws.path[:60]}")
+
+            def on_frame_sent(data):
+                nonlocal ws_seq
+                ws_seq += 1
+                payload = safe_body(data)
+                ws_records.append({
+                    "ws_seq": ws_seq,
+                    "conn_id": conn_id,
+                    "timestamp": datetime.now().isoformat(),
+                    "elapsed_seconds": round(time.time() - start_time, 2),
+                    "direction": "sent",
+                    "url": ws_url,
+                    "domain": parsed_ws.netloc,
+                    "path": parsed_ws.path,
+                    "payload": payload,
+                    "payload_size": len(data) if isinstance(data, (str, bytes)) else 0,
+                })
+                preview = str(payload)[:60] if payload else ""
+                print(f"  [WS {conn_id}] → SENT  {preview}")
+
+            def on_frame_received(data):
+                nonlocal ws_seq
+                ws_seq += 1
+                payload = safe_body(data)
+                ws_records.append({
+                    "ws_seq": ws_seq,
+                    "conn_id": conn_id,
+                    "timestamp": datetime.now().isoformat(),
+                    "elapsed_seconds": round(time.time() - start_time, 2),
+                    "direction": "received",
+                    "url": ws_url,
+                    "domain": parsed_ws.netloc,
+                    "path": parsed_ws.path,
+                    "payload": payload,
+                    "payload_size": len(data) if isinstance(data, (str, bytes)) else 0,
+                })
+                preview = str(payload)[:60] if payload else ""
+                print(f"  [WS {conn_id}] ← RECV  {preview}")
+
+            def on_close():
+                print(f"  [WS {conn_id}] Closed")
+
+            ws.on("framesent", on_frame_sent)
+            ws.on("framereceived", on_frame_received)
+            ws.on("close", on_close)
+
+        page.on("websocket", on_websocket)
+
         # Navigate
         if url:
             print(f"Navigating to: {url}\n")
@@ -721,17 +830,18 @@ async def run_capture(profile: dict, url_override: str | None, filter_override: 
         except Exception:
             pass
 
-    return records
+    return records, ws_records
 
 
-def save_results(records: list[dict], profile: dict, url: str | None):
+def save_results(records: list[dict], ws_records: list[dict],
+                 profile: dict, url: str | None):
     """Save capture results to three locations:
 
     - captures/{domain}_{ts}.json  — raw data with sensitive info (gitignored)
     - reports/{domain}_{ts}.md     — sanitized analysis report (safe to share/commit)
     - credentials/{domain}.json    — extracted cookies/tokens (gitignored)
     """
-    if not records:
+    if not records and not ws_records:
         print("\nNo API requests captured.")
         return None, None
 
@@ -759,12 +869,14 @@ def save_results(records: list[dict], profile: dict, url: str | None):
             "url": url or profile.get("url"),
             "domain": domain,
             "total_requests": len(records),
+            "total_ws_messages": len(ws_records),
             "unique_endpoints": len(groups),
         },
         "profile": profile,
         "auth_analysis": auth_info,
         "endpoints": {k: len(v) for k, v in groups.items()},
         "records": records,
+        "ws_records": ws_records,
     }
     raw_json_path.write_text(
         json.dumps(raw_output, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -805,19 +917,24 @@ def save_results(records: list[dict], profile: dict, url: str | None):
         "auth_analysis": auth_info,
         "endpoints": {k: len(v) for k, v in sanitized_groups.items()},
         "records": sanitized_records,
+        "ws_records": ws_records,
     }
     report_json_path.write_text(
         json.dumps(sanitized_output, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
     # Sanitized Markdown
-    md_content = generate_markdown(sanitized_records, auth_info, sanitized_groups, profile)
+    md_content = generate_markdown(sanitized_records, auth_info, sanitized_groups,
+                                   profile, ws_records)
     report_md_path.write_text(md_content, encoding="utf-8")
 
     print(f"\n{'='*55}")
     print(f"  Capture complete! (profile: {profile_name})")
     print(f"  Requests:    {len(records)}")
     print(f"  Endpoints:   {len(groups)}")
+    if ws_records:
+        ws_conns = len(set(r["conn_id"] for r in ws_records))
+        print(f"  WebSocket:   {len(ws_records)} messages across {ws_conns} connection(s)")
     print(f"{'='*55}")
     print(f"  Raw data:    {raw_json_path}")
     print(f"  Credentials: {creds_path}")
@@ -839,8 +956,8 @@ def main():
     url = args.url or profile.get("url")
 
     import asyncio
-    records = asyncio.run(run_capture(profile, args.url, args.filter))
-    save_results(records, profile, url)
+    records, ws_records = asyncio.run(run_capture(profile, args.url, args.filter))
+    save_results(records, ws_records, profile, url)
 
 
 if __name__ == "__main__":
