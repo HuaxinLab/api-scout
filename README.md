@@ -18,7 +18,9 @@ api-scout/
 │   └── xyq.yaml             ← 小云雀 AI 视频
 ├── tools/
 │   └── api_capture.py       ← 核心抓包脚本
-└── captures/                ← 输出目录（自动创建，已 gitignore）
+├── captures/                ← 原始数据（含敏感信息，gitignored）
+├── credentials/             ← 提取的 cookie/token（gitignored）
+└── reports/                 ← 脱敏分析报告（可安全分享/提交）
 ```
 
 ## 安装
@@ -77,16 +79,17 @@ python tools/api_capture.py
 2. 登录目标网站（如需要）
 3. 执行你想抓取的完整操作流程
 4. **关闭浏览器**结束抓包
-5. 查看 `captures/` 下生成的 JSON 和 Markdown 报告
+5. 查看输出文件
 
 ## 输出文件
 
-每次抓包生成两个文件：
+每次抓包输出到三个目录：
 
-| 文件 | 内容 |
-|------|------|
-| `{domain}_{timestamp}.json` | 完整数据：每个请求的 headers、body、响应、时序 |
-| `{domain}_{timestamp}.md` | 可读报告：认证分析、API 分类、请求时间线、端点详情 |
+| 目录 | 文件 | 内容 | 安全性 |
+|------|------|------|--------|
+| `captures/` | `{domain}_{ts}.json` | 原始请求/响应（含真实 cookie/token） | **gitignored，勿分享** |
+| `credentials/` | `{domain}.json` | 提取的 cookie 和 token，跨抓包自动合并 | **gitignored，勿分享** |
+| `reports/` | `{domain}_{ts}.md` + `.json` | 脱敏分析报告（敏感值已遮蔽） | 可安全提交/分享 |
 
 ### Markdown 报告结构
 

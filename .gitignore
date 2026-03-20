@@ -1,4 +1,12 @@
 .venv/
 __pycache__/
 *.pyc
+
+# Raw captures contain sensitive cookies/tokens
 captures/
+
+# Extracted credentials
+credentials/
+
+# Sanitized reports are safe to commit (uncomment to ignore)
+# reports/

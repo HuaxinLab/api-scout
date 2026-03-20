@@ -25,7 +25,9 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PROFILES_DIR = PROJECT_ROOT / "profiles"
-CAPTURES_DIR = PROJECT_ROOT / "captures"
+CAPTURES_DIR = PROJECT_ROOT / "captures"       # raw data (contains sensitive info)
+REPORTS_DIR = PROJECT_ROOT / "reports"          # sanitized analysis reports (safe to share)
+CREDENTIALS_DIR = PROJECT_ROOT / "credentials"  # extracted cookies/tokens
 
 MAX_BODY_SIZE = 50 * 1024  # 50KB
 SKIP_RESOURCE_TYPES = {"image", "font", "stylesheet", "media", "manifest", "other"}
@@ -234,6 +236,104 @@ def group_endpoints(records: list[dict]) -> dict[str, list[dict]]:
             groups[key] = []
         groups[key].append(rec)
     return groups
+
+
+# ─── Credential Extraction & Sanitization ────────────────────────────
+
+SENSITIVE_COOKIE_KEYS = {
+    "sessionid", "sessionid_ss", "sid_tt", "sid_guard", "uid_tt", "uid_tt_ss",
+    "passport_csrf_token", "ttwid", "msToken", "odin_tt",
+}
+SENSITIVE_QUERY_KEYS = {"msToken", "a_bogus", "token", "sign"}
+SENSITIVE_HEADER_KEYS = {"cookie", "authorization", "x-tt-passport-csrf-token"}
+
+
+def extract_credentials(records: list[dict]) -> dict:
+    """Extract all unique cookies, tokens, and auth headers from captured records."""
+    cookies: dict[str, str] = {}
+    tokens: dict[str, str] = {}
+    full_cookie_strings: list[str] = []
+
+    for rec in records:
+        headers = rec.get("request_headers", {})
+
+        # Extract cookies
+        raw_cookie = headers.get("cookie", "")
+        if raw_cookie and raw_cookie not in full_cookie_strings:
+            full_cookie_strings.append(raw_cookie)
+        for part in raw_cookie.split(";"):
+            if "=" in part:
+                name, _, value = part.partition("=")
+                name = name.strip()
+                value = value.strip()
+                if value and (name in SENSITIVE_COOKIE_KEYS or
+                              any(k in name.lower() for k in ("session", "token", "sid", "uid", "auth"))):
+                    cookies[name] = value
+
+        # Extract auth headers
+        for key in ("authorization", "x-tt-passport-csrf-token"):
+            if key in headers and headers[key]:
+                tokens[f"header:{key}"] = headers[key]
+
+        # Extract auth query params
+        for key in ("msToken", "a_bogus", "token"):
+            val = rec.get("query_params", {}).get(key)
+            if val:
+                tokens[f"query:{key}"] = val if isinstance(val, str) else val[0]
+
+    return {
+        "cookies": cookies,
+        "tokens": tokens,
+        "full_cookie_string": full_cookie_strings[0] if full_cookie_strings else "",
+    }
+
+
+def _mask(value: str, show: int = 6) -> str:
+    """Mask a sensitive value, showing only first N chars."""
+    if len(value) <= show:
+        return value
+    return value[:show] + "*" * min(8, len(value) - show)
+
+
+def sanitize_record(rec: dict) -> dict:
+    """Return a copy of a record with sensitive values masked."""
+    rec = json.loads(json.dumps(rec))  # deep copy
+
+    # Mask cookie header
+    headers = rec.get("request_headers", {})
+    if "cookie" in headers:
+        parts = []
+        for part in headers["cookie"].split(";"):
+            if "=" in part:
+                name, _, value = part.partition("=")
+                name = name.strip()
+                if name.lower() in {k.lower() for k in SENSITIVE_COOKIE_KEYS} or \
+                   any(k in name.lower() for k in ("session", "token", "sid", "uid")):
+                    parts.append(f"{name}={_mask(value.strip())}")
+                else:
+                    parts.append(part.strip())
+            else:
+                parts.append(part.strip())
+        headers["cookie"] = "; ".join(parts)
+
+    # Mask auth headers
+    for key in ("authorization", "x-tt-passport-csrf-token"):
+        if key in headers:
+            headers[key] = _mask(headers[key])
+
+    # Mask sensitive query params
+    qp = rec.get("query_params", {})
+    for key in SENSITIVE_QUERY_KEYS:
+        if key in qp:
+            qp[key] = _mask(qp[key]) if isinstance(qp[key], str) else qp[key]
+
+    # Mask URL (replace sensitive query param values)
+    url = rec.get("url", "")
+    for key in SENSITIVE_QUERY_KEYS:
+        url = re.sub(rf"({key}=)[^&]+", rf"\1***", url)
+    rec["url"] = url
+
+    return rec
 
 
 # ─── Markdown Report ─────────────────────────────────────────────────
@@ -552,7 +652,12 @@ async def run_capture(profile: dict, url_override: str | None, filter_override: 
 
 
 def save_results(records: list[dict], profile: dict, url: str | None):
-    """Save capture results to JSON and Markdown files."""
+    """Save capture results to three locations:
+
+    - captures/{domain}_{ts}.json  — raw data with sensitive info (gitignored)
+    - reports/{domain}_{ts}.md     — sanitized analysis report (safe to share/commit)
+    - credentials/{domain}.json    — extracted cookies/tokens (gitignored)
+    """
     if not records:
         print("\nNo API requests captured.")
         return None, None
@@ -566,17 +671,15 @@ def save_results(records: list[dict], profile: dict, url: str | None):
         domain = urlparse(records[0]["url"]).netloc.replace(".", "_").replace(":", "_")
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
+    for d in (CAPTURES_DIR, REPORTS_DIR, CREDENTIALS_DIR):
+        d.mkdir(parents=True, exist_ok=True)
 
-    json_path = CAPTURES_DIR / f"{domain}_{timestamp}.json"
-    md_path = CAPTURES_DIR / f"{domain}_{timestamp}.md"
-
-    # Analysis
+    # ── 1. Raw capture (contains sensitive data) ──
+    raw_json_path = CAPTURES_DIR / f"{domain}_{timestamp}.json"
     auth_info = detect_auth_patterns(records, profile)
     groups = group_endpoints(records)
 
-    # Save JSON
-    output = {
+    raw_output = {
         "meta": {
             "captured_at": datetime.now().isoformat(),
             "profile": profile_name,
@@ -590,21 +693,66 @@ def save_results(records: list[dict], profile: dict, url: str | None):
         "endpoints": {k: len(v) for k, v in groups.items()},
         "records": records,
     }
-    json_path.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
+    raw_json_path.write_text(
+        json.dumps(raw_output, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
-    # Save Markdown
-    md_content = generate_markdown(records, auth_info, groups, profile)
-    md_path.write_text(md_content, encoding="utf-8")
+    # ── 2. Credentials (extracted cookies/tokens) ──
+    creds = extract_credentials(records)
+    creds_path = CREDENTIALS_DIR / f"{domain}.json"
 
-    print(f"\n{'='*50}")
-    print(f"Capture complete! (profile: {profile_name})")
-    print(f"  Requests: {len(records)}")
-    print(f"  Endpoints: {len(groups)}")
-    print(f"  JSON: {json_path}")
-    print(f"  Report: {md_path}")
-    print(f"{'='*50}")
+    # Merge with existing credentials (don't overwrite previous captures)
+    if creds_path.exists():
+        try:
+            existing = json.loads(creds_path.read_text(encoding="utf-8"))
+            existing.setdefault("cookies", {}).update(creds["cookies"])
+            existing.setdefault("tokens", {}).update(creds["tokens"])
+            if creds["full_cookie_string"]:
+                existing["full_cookie_string"] = creds["full_cookie_string"]
+            existing["last_updated"] = datetime.now().isoformat()
+            creds = existing
+        except (json.JSONDecodeError, KeyError):
+            pass
 
-    return json_path, md_path
+    creds.setdefault("last_updated", datetime.now().isoformat())
+    creds_path.write_text(
+        json.dumps(creds, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    # ── 3. Sanitized report (safe to share) ──
+    sanitized_records = [sanitize_record(r) for r in records]
+    sanitized_groups = group_endpoints(sanitized_records)
+    report_md_path = REPORTS_DIR / f"{domain}_{timestamp}.md"
+    report_json_path = REPORTS_DIR / f"{domain}_{timestamp}.json"
+
+    # Sanitized JSON (no raw cookies/tokens)
+    sanitized_output = {
+        "meta": raw_output["meta"],
+        "profile": profile,
+        "auth_analysis": auth_info,
+        "endpoints": {k: len(v) for k, v in sanitized_groups.items()},
+        "records": sanitized_records,
+    }
+    report_json_path.write_text(
+        json.dumps(sanitized_output, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    # Sanitized Markdown
+    md_content = generate_markdown(sanitized_records, auth_info, sanitized_groups, profile)
+    report_md_path.write_text(md_content, encoding="utf-8")
+
+    print(f"\n{'='*55}")
+    print(f"  Capture complete! (profile: {profile_name})")
+    print(f"  Requests:    {len(records)}")
+    print(f"  Endpoints:   {len(groups)}")
+    print(f"{'='*55}")
+    print(f"  Raw data:    {raw_json_path}")
+    print(f"  Credentials: {creds_path}")
+    print(f"  Report (md): {report_md_path}")
+    print(f"  Report (json): {report_json_path}")
+    print(f"{'='*55}")
+
+    return report_md_path, report_json_path
 
 
 def main():

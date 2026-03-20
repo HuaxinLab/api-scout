@@ -101,36 +101,83 @@ After running the command, a visible Chromium browser window will open. Tell the
 
 #### Output Files
 
-When the browser closes, two files are saved to `$TOOL_DIR/captures/`:
+When the browser closes, the script saves to **three** directories:
 
-| File | Content |
-|------|---------|
-| `{domain}_{timestamp}.json` | Full structured data: every request/response with headers, bodies, timing |
-| `{domain}_{timestamp}.md` | Human-readable report: auth analysis, timeline, endpoint details |
+```
+$TOOL_DIR/
+├── captures/                          ← RAW (contains sensitive cookies/tokens, gitignored)
+│   └── {domain}_{timestamp}.json      Full request/response data with real credentials
+│
+├── credentials/                       ← CREDENTIALS (extracted cookies/tokens, gitignored)
+│   └── {domain}.json                  Deduplicated cookies + tokens, merged across captures
+│
+└── reports/                           ← SANITIZED (safe to share/commit)
+    ├── {domain}_{timestamp}.md        Human-readable analysis report (credentials masked)
+    └── {domain}_{timestamp}.json      Structured data with credentials masked
+```
 
-The script prints the exact file paths at the end. Use these paths in the next step.
+**Security model:**
+- `captures/` and `credentials/` are **gitignored** — they contain real session tokens
+- `reports/` is **safe to share** — all cookie values, tokens, and `a_bogus` are masked (e.g., `sessionid=e7a08d********`)
+- `credentials/{domain}.json` is **merged across captures** — each new capture updates it, so you always have the latest tokens
+
+The script prints all file paths at the end. Use the `reports/` paths for analysis.
+
+#### Credentials File Format
+
+`credentials/{domain}.json` contains:
+```json
+{
+  "cookies": {
+    "sessionid": "actual_value",
+    "sid_tt": "actual_value",
+    "uid_tt": "actual_value"
+  },
+  "tokens": {
+    "header:x-tt-passport-csrf-token": "actual_value",
+    "query:msToken": "actual_value"
+  },
+  "full_cookie_string": "sessionid=xxx; sid_tt=xxx; ...",
+  "last_updated": "2026-03-20T16:24:43"
+}
+```
+
+Use this file when:
+- Building an API client that needs real credentials
+- Validating if a session is still active
+- Comparing credentials across captures (e.g., did the token change?)
 
 ### Step 3: Read the Output
 
-Read **both** output files:
+Read from the **reports/** directory (sanitized, safe):
 
 ```
-Read $TOOL_DIR/captures/{domain}_{timestamp}.md    ← start here for overview
-Read $TOOL_DIR/captures/{domain}_{timestamp}.json  ← dig into specific requests
+Read $TOOL_DIR/reports/{domain}_{timestamp}.md      ← start here for overview
+Read $TOOL_DIR/reports/{domain}_{timestamp}.json    ← dig into specific requests
 ```
 
-The Markdown report contains:
+If you need **real credential values** (e.g., to build an API client), read:
+```
+Read $TOOL_DIR/credentials/{domain}.json            ← real cookies/tokens
+```
+
+If you need the **full raw data** (unsanitized), read:
+```
+Read $TOOL_DIR/captures/{domain}_{timestamp}.json   ← everything, including raw cookies
+```
+
+**Report Markdown sections:**
 - **Section 0 — API Categories**: Endpoints grouped by category (only if profile defines categories)
 - **Section 1 — Authentication Analysis**: Detected cookies, auth headers, signature params
 - **Section 2 — Request Timeline**: Chronological list of all captured API calls with status and category
 - **Section 3 — Endpoint Details**: Per-endpoint breakdown with headers, query params, request body, response body samples
 
-The JSON file contains:
+**Report JSON structure:**
 - `meta`: Capture metadata (profile, timestamp, counts)
 - `profile`: The full profile config used
 - `auth_analysis`: Detected auth patterns
 - `endpoints`: Endpoint → call count mapping
-- `records[]`: Array of every captured request with full details
+- `records[]`: Array of every captured request (credentials masked)
 
 ### Step 4: Analyze and Report
 
@@ -276,3 +323,22 @@ auth_hints:
 - **Large responses truncated** — bodies > 50KB are truncated in the JSON. If a specific response needs full content, the user should re-capture or use browser DevTools
 - **Profile mismatch** — if a profile filters too aggressively (missing expected requests), suggest running without `filter_domains` or with `--filter` override to debug
 - **The JSON is the source of truth** — the Markdown is a convenience summary. Always refer to JSON for exact header values, full query params, etc.
+
+## Reusing Previous Captures
+
+Not every interaction requires a fresh capture. Check for existing data first:
+
+```bash
+ls $TOOL_DIR/reports/       # existing analysis reports
+ls $TOOL_DIR/credentials/   # existing credentials
+```
+
+**When to reuse:**
+- User asks "analyze doubao API" and `reports/www_doubao_com_*.md` already exists → read the latest report, skip capture
+- User asks to build an API client → read `credentials/{domain}.json` for real tokens + `reports/` for endpoint specs
+- User says "re-capture" or "capture again" → run a new capture, it will merge new credentials into the existing file
+
+**When NOT to reuse:**
+- User explicitly asks for a fresh capture
+- Credentials file is stale (check `last_updated` timestamp — tokens may expire in hours)
+- Previous capture was for a different workflow (e.g., had chat data but now needs video generation)
