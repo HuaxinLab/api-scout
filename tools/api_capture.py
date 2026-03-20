@@ -639,6 +639,22 @@ async def run_capture(profile: dict, url_override: str | None, filter_override: 
         except Exception:
             pass
 
+        # Extract cookies from browser context before closing
+        browser_cookies = {}
+        try:
+            raw_cookies = await context.cookies()
+            for c in raw_cookies:
+                browser_cookies[c["name"]] = c["value"]
+            if browser_cookies:
+                cookie_str = "; ".join(f"{k}={v}" for k, v in browser_cookies.items())
+                # Inject cookie header into all records that lack it
+                for rec in records:
+                    if not rec["request_headers"].get("cookie"):
+                        rec["request_headers"]["cookie"] = cookie_str
+                print(f"\n  Extracted {len(browser_cookies)} cookies from browser context")
+        except Exception:
+            pass
+
         try:
             await context.close()
         except Exception:
