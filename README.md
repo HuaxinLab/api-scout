@@ -8,26 +8,20 @@
 
 ```
 api-scout/
-├── skill.md                 ← 通用 Skill 定义（可迁移给任何 agent）
+├── SKILL.md                 ← 通用 Skill 定义（可迁移给任何 agent）
 ├── requirements.txt
 ├── .gitignore
 ├── profiles/                ← 站点配置
 │   ├── _default.yaml        ← 通用兜底
-│   ├── doubao.yaml          ← 豆包 AI 对话
-│   ├── jimeng.yaml          ← 即梦 AI 视频生成
-│   └── xyq.yaml             ← 小云雀 AI 视频
+│   └── <site>.yaml          ← 自定义站点（gitignored）
 ├── tools/
 │   └── api_capture.py       ← 核心抓包脚本
-├── examples/                ← API 调用示例脚本
-│   └── doubao_chat_test.py  ← 豆包聊天 API (纯 HTTP，无需浏览器)
+├── examples/                ← API 调用示例脚本（gitignored）
 ├── tests/
 │   └── test_core.py         ← 核心逻辑测试 (53 个)
 ├── captures/                ← 原始数据（含敏感信息，gitignored）
 ├── credentials/             ← 提取的 cookie/token（gitignored）
-└── reports/                 ← 脱敏分析报告 + API Spec
-    ├── www_doubao_com_api_spec.md
-    ├── jimeng_jianying_com_api_spec.md
-    └── xyq_jianying_com_api_spec.md
+└── reports/                 ← 脱敏分析报告 + API Spec（gitignored）
 ```
 
 ## 安装
@@ -44,10 +38,8 @@ playwright install chromium
 ### 抓包
 
 ```bash
-# 使用预置 Profile（推荐）
-python tools/api_capture.py --profile doubao
-python tools/api_capture.py --profile jimeng
-python tools/api_capture.py --profile xyq
+# 使用预置 Profile
+python tools/api_capture.py --profile <site>
 
 # 自定义 URL
 python tools/api_capture.py --url "https://www.example.com"
@@ -56,7 +48,7 @@ python tools/api_capture.py --url "https://www.example.com"
 python tools/api_capture.py --url "https://www.example.com" --filter "example.com"
 
 # Profile + URL 覆盖
-python tools/api_capture.py --profile doubao --url "https://www.doubao.com/chat/special"
+python tools/api_capture.py --profile <site> --url "https://example.com/special"
 ```
 
 | 参数 | 缩写 | 说明 |
@@ -67,26 +59,6 @@ python tools/api_capture.py --profile doubao --url "https://www.doubao.com/chat/
 
 操作：浏览器弹出 → 登录 → 执行操作 → **关闭浏览器**结束抓包。
 
-### API 调用示例
-
-```bash
-# 豆包聊天（纯 HTTP，无需浏览器）
-python examples/doubao_chat_test.py "你好"
-
-# 指定 cookie 文件（支持 4 种格式）
-python examples/doubao_chat_test.py --cookie /path/to/cookies.json "你好"
-python examples/doubao_chat_test.py --cookie /path/to/cookies.txt "你好"
-
-# 管道输入
-echo "翻译成英文：你好" | python examples/doubao_chat_test.py
-```
-
-支持的 cookie 格式：
-- **JSON 数组** — 浏览器插件导出: `[{"name":"sessionid","value":"xxx"}, ...]`
-- **Netscape/curl txt** — `domain  TRUE  /  FALSE  0  name  value`
-- **Key=Value 字符串** — DevTools 手动复制: `sessionid=xxx; sid_tt=yyy`
-- **api-scout credentials** — 本工具抓包生成的 `credentials/*.json`
-
 ## 输出文件
 
 每次抓包输出到三个目录：
@@ -95,7 +67,7 @@ echo "翻译成英文：你好" | python examples/doubao_chat_test.py
 |------|------|------|--------|
 | `captures/` | `{domain}_{ts}.json` | 原始请求/响应（含真实 cookie/token） | **gitignored，勿分享** |
 | `credentials/` | `{domain}.json` | 提取的 cookie 和 token，跨抓包自动合并 | **gitignored，勿分享** |
-| `reports/` | `{domain}_{ts}.md` + `.json` | 脱敏分析报告（敏感值已遮蔽） | 可安全提交/分享 |
+| `reports/` | `{domain}_{ts}.md` + `.json` | 脱敏分析报告（敏感值已遮蔽） | gitignored（可自行选择分享） |
 
 ### 报告结构
 
@@ -107,13 +79,7 @@ echo "翻译成英文：你好" | python examples/doubao_chat_test.py
 
 ### API Spec
 
-多次抓包后可整理为完整的 API 文档，保存在 `reports/` 下：
-
-| 文件 | 站点 | 来源 |
-|------|------|------|
-| `www_doubao_com_api_spec.md` | 豆包 | 6 次抓包 + doubao-free-api 项目参考 |
-| `jimeng_jianying_com_api_spec.md` | 即梦 | 代码逆向 + 3 个开源项目对比 |
-| `xyq_jianying_com_api_spec.md` | 小云雀 | 代码逆向 |
+多次抓包后可整理为完整的 API 文档，保存在 `reports/{domain}_api_spec.md`。
 
 ## 抓包能力
 
@@ -167,12 +133,12 @@ python -m pytest tests/ -v
 
 ## 作为 Skill 使用
 
-将 `skill.md` 复制到 agent 的 skill/command 目录：
+将 `SKILL.md` 复制到 agent 的 skill/command 目录：
 
 ```bash
-cp skill.md ~/.claude/commands/api-scout.md
+cp SKILL.md ~/.claude/commands/api-scout.md
 ```
 
 Skill 工作流（7 步）：环境准备 → 抓包 → 读取输出 → 分析 → 报告 → 整理 API Spec → 辅助开发。
 
-详见 [skill.md](skill.md)。
+详见 [SKILL.md](SKILL.md)。

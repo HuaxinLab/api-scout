@@ -27,12 +27,12 @@ echo "API Scout at: $TOOL_DIR"
 
 Pre-configured profiles live in `$TOOL_DIR/profiles/`. Each profile defines URL, domain filters, noise paths to ignore, API categories, and known auth patterns.
 
-| Profile | File | Target |
-|---------|------|--------|
-| `doubao` | `profiles/doubao.yaml` | 豆包 AI 对话 (doubao.com) |
-| `jimeng` | `profiles/jimeng.yaml` | 即梦 AI 视频生成 (jimeng.jianying.com) |
-| `xyq` | `profiles/xyq.yaml` | 小云雀 AI 视频 (xyq.jianying.com) |
-| (none) | `profiles/_default.yaml` | 通用兜底，不做特殊过滤 |
+To discover available profiles:
+```bash
+ls $TOOL_DIR/profiles/*.yaml
+```
+
+`_default.yaml` is the built-in fallback that captures all domains without filtering. Other `.yaml` files are site-specific profiles — read them to see their target URL and configuration.
 
 You can also create new profiles — see "Creating a New Profile" section below.
 
@@ -63,7 +63,7 @@ Choose ONE of the following based on user input:
 ```bash
 python tools/api_capture.py --profile <profile_name>
 ```
-Example: `python tools/api_capture.py --profile doubao`
+Example: `python tools/api_capture.py --profile <name>`
 
 The profile provides the URL, filters, and categories automatically.
 
@@ -204,21 +204,24 @@ Read $TOOL_DIR/captures/{domain}_{timestamp}.json   ← everything, including ra
 Before running a new capture, check if specs or examples already exist:
 
 ```bash
-ls $TOOL_DIR/reports/*_api_spec.md    # compiled API specifications
-ls $TOOL_DIR/examples/                # working API client scripts
+ls $TOOL_DIR/reports/*_api_spec.md 2>/dev/null    # compiled API specifications
+ls $TOOL_DIR/examples/ 2>/dev/null                # working API client scripts
 ```
 
-**Available API Specs:**
-| File | Site |
-|------|------|
-| `reports/www_doubao_com_api_spec.md` | 豆包 — chat/image/video, auth, anti-scraping |
-| `reports/jimeng_jianying_com_api_spec.md` | 即梦 — video generation, open-source project comparison |
-| `reports/xyq_jianying_com_api_spec.md` | 小云雀 — agent-based video generation |
+- **API Specs** (`reports/{domain}_api_spec.md`): Consolidated endpoint documentation compiled from multiple captures. Read these first when the user asks about a site's API.
+- **Examples** (`examples/`): Working API client scripts that demonstrate how to call specific APIs. Typically include cookie/auth handling, SSE streaming, etc.
 
-**Available Examples:**
-| File | Description |
-|------|-------------|
-| `examples/doubao_chat_test.py` | 豆包聊天 (pure HTTP, streaming SSE, supports 4 cookie formats via `--cookie`) |
+Example: an API client script might look like:
+```python
+# Pure HTTP call with cookie auth and SSE streaming
+import httpx
+
+resp = httpx.post("https://example.com/api/chat/completion",
+    headers={"Cookie": cookie_string},
+    json={"message": "hello", "conversation_id": conv_id},
+    timeout=60)
+# Parse SSE stream...
+```
 
 When the user asks to use an existing API, read the spec + example first instead of re-capturing.
 
@@ -475,7 +478,7 @@ ls $TOOL_DIR/credentials/   # existing credentials
 ```
 
 **When to reuse:**
-- User asks "analyze doubao API" and `reports/www_doubao_com_*.md` already exists → read the latest report, skip capture
+- User asks to analyze a site's API and `reports/{domain}_*.md` already exists → read the latest report, skip capture
 - User asks to build an API client → read `credentials/{domain}.json` for real tokens + `reports/` for endpoint specs
 - User says "re-capture" or "capture again" → run a new capture, it will merge new credentials into the existing file
 
