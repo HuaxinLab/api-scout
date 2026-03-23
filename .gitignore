@@ -10,4 +10,11 @@ captures/
 credentials/
 
 # Sanitized reports are safe to commit (uncomment to ignore)
-# reports/
+reports/
+
+# Examples contain real API usage with sensitive data
+examples/
+
+# Non-default profiles contain real API endpoints/keys
+profiles/*
+!profiles/_default.yaml
