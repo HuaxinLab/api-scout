@@ -4,10 +4,10 @@ Launches a visible browser, captures all API requests while you manually
 operate any website, then outputs structured JSON + Markdown summary.
 
 Usage:
-    python tools/api_capture.py --profile doubao
-    python tools/api_capture.py --profile jimeng
-    python tools/api_capture.py --url "https://example.com" --filter "example.com"
-    python tools/api_capture.py  # opens blank page, default profile
+    python scripts/api_capture.py --profile doubao
+    python scripts/api_capture.py --profile jimeng
+    python scripts/api_capture.py --url "https://example.com" --filter "example.com"
+    python scripts/api_capture.py  # opens blank page, default profile
 """
 
 import argparse
