@@ -25,8 +25,10 @@ from scripts.api_capture import (
     generate_markdown,
     _mask,
     _is_alias_segment,
+    _skeleton_path,
     detect_path_anomalies,
     detect_set_cookies,
+    diagnose_request,
 )
 
 
@@ -599,3 +601,195 @@ class TestDetectSetCookies:
         ]
         result = detect_set_cookies(records)
         assert len(result) == 0
+
+
+# ─── Skeleton Path ────────────────────────────────────────────────
+
+class TestSkeletonPath:
+
+    def test_replaces_ids(self):
+        assert _skeleton_path("/api/12345/detail") == "/api/*/detail"
+
+    def test_replaces_hashes(self):
+        assert _skeleton_path("/signflows/13b3276b3bb4c2dbfae5bdea85dcb03/data") == \
+            "/signflows/*/data"
+
+    def test_replaces_aliases(self):
+        assert _skeleton_path("/signflows/sys_flowId/setCacheData") == \
+            "/signflows/*/setCacheData"
+
+    def test_both_match_same_skeleton(self):
+        s1 = _skeleton_path("/signflows/sys_flowId/sign/sys_accountId/setCacheData")
+        s2 = _skeleton_path("/signflows/13b3276b3bb4c2dbfae5bdea85dcb03/sign/726c36e7648d4c7ebfbad50ef05a321e/setCacheData")
+        assert s1 == s2
+
+    def test_preserves_static_segments(self):
+        assert _skeleton_path("/api/v1/users/config") == "/api/v1/users/config"
+
+
+# ─── Request Diagnosis ────────────────────────────────────────────
+
+class TestDiagnoseRequest:
+
+    def _write_report(self, tmp_path, records):
+        """Write a minimal report JSON to a temp file."""
+        report = {"records": records}
+        path = tmp_path / "report.json"
+        path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+        return str(path)
+
+    def _captured_record(self, method="POST", path="/openwebserver/v3/signflows/sys_flowId/sign/sys_accountId/setCacheData",
+                         query_params=None, headers=None, body=None, status=200):
+        return {
+            "seq": 63,
+            "method": method,
+            "url": f"https://api.example.com{path}",
+            "path": path,
+            "normalized_path": normalize_path(path),
+            "query_params": query_params or {},
+            "request_headers": headers or {"content-type": "application/json",
+                                           "webserver-token": "abc123",
+                                           "x-tsign-client-id": "WEB"},
+            "request_body": body,
+            "response_status": status,
+        }
+
+    def test_detects_path_alias_diff(self, tmp_path):
+        """Core e-sign case: script uses real ID, capture has sys_flowId."""
+        captured = self._captured_record()
+        report_path = self._write_report(tmp_path, [captured])
+
+        failed = {
+            "method": "POST",
+            "url": "https://api.example.com/openwebserver/v3/signflows/13b3276b3bb4c2dbfae5bdea85dcb03/sign/726c36e7648d4c7ebfbad50ef05a321e/setCacheData",
+            "headers": {"content-type": "application/json",
+                        "webserver-token": "abc123",
+                        "x-tsign-client-id": "WEB"},
+            "status": 403,
+        }
+        result = diagnose_request(failed, report_path)
+
+        assert result["matched_record"] is not None
+        assert result["matched_record"]["seq"] == 63
+        assert len(result["diffs"]) >= 2  # at least sys_flowId and sys_accountId
+
+        path_diffs = [d for d in result["diffs"] if d["field"] == "path"]
+        alias_diffs = [d for d in path_diffs if "alias" in d["hint"]]
+        assert len(alias_diffs) >= 1
+        captured_vals = {d["captured"] for d in alias_diffs}
+        assert "sys_flowId" in captured_vals
+
+    def test_detects_query_param_alias(self, tmp_path):
+        captured = self._captured_record(
+            method="GET",
+            path="/webserver-will/v1/willingness/sys_transId/info",
+            query_params={"transId": "sys_transId", "client": "WEB"},
+        )
+        report_path = self._write_report(tmp_path, [captured])
+
+        real_id = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"  # 32-char hex (realistic)
+        failed = {
+            "method": "GET",
+            "url": f"https://api.example.com/webserver-will/v1/willingness/{real_id}/info?transId={real_id}&client=WEB",
+            "headers": {},
+        }
+        result = diagnose_request(failed, report_path)
+
+        assert result["matched_record"] is not None
+        qp_diffs = [d for d in result["diffs"] if d["field"] == "query_param"]
+        assert any(d["key"] == "transId" and "alias" in d["hint"] for d in qp_diffs)
+
+    def test_detects_missing_header(self, tmp_path):
+        captured = self._captured_record(
+            headers={"content-type": "application/json",
+                     "webserver-token": "abc123",
+                     "x-tsign-client-id": "WEB"},
+        )
+        report_path = self._write_report(tmp_path, [captured])
+
+        failed = {
+            "method": "POST",
+            "url": "https://api.example.com/openwebserver/v3/signflows/sys_flowId/sign/sys_accountId/setCacheData",
+            "headers": {"content-type": "application/json"},  # missing webserver-token
+        }
+        result = diagnose_request(failed, report_path)
+
+        header_diffs = [d for d in result["diffs"] if d["field"] == "header"]
+        missing = [d for d in header_diffs if d["actual"] == "<missing>"]
+        assert any(d["key"] == "webserver-token" for d in missing)
+
+    def test_detects_body_missing_keys(self, tmp_path):
+        captured = self._captured_record(
+            body={"cacheData": "...", "signType": "1", "extra": "field"},
+        )
+        report_path = self._write_report(tmp_path, [captured])
+
+        failed = {
+            "method": "POST",
+            "url": "https://api.example.com/openwebserver/v3/signflows/sys_flowId/sign/sys_accountId/setCacheData",
+            "headers": {},
+            "body": {"cacheData": "..."},  # missing signType and extra
+        }
+        result = diagnose_request(failed, report_path)
+
+        body_diffs = [d for d in result["diffs"] if d["field"] == "body"]
+        assert any("missing keys" in d["hint"] for d in body_diffs)
+
+    def test_no_match_returns_candidates(self, tmp_path):
+        captured = self._captured_record(method="GET", path="/api/users")
+        report_path = self._write_report(tmp_path, [captured])
+
+        failed = {
+            "method": "DELETE",
+            "url": "https://api.example.com/api/completely/different",
+            "headers": {},
+        }
+        result = diagnose_request(failed, report_path)
+        assert "error" in result
+
+    def test_exact_match_no_diffs(self, tmp_path):
+        captured = self._captured_record(
+            method="GET", path="/api/config",
+            query_params={"t": "12345"},
+            headers={"content-type": "application/json", "x-custom": "val"},
+        )
+        report_path = self._write_report(tmp_path, [captured])
+
+        failed = {
+            "method": "GET",
+            "url": "https://api.example.com/api/config?t=12345",
+            "headers": {"content-type": "application/json", "x-custom": "val"},
+        }
+        result = diagnose_request(failed, report_path)
+
+        assert result["matched_record"] is not None
+        assert len(result["diffs"]) == 0
+        assert "path" in result["no_diff_fields"]
+        assert "query_params" in result["no_diff_fields"]
+
+    def test_report_not_found(self):
+        result = diagnose_request(
+            {"method": "GET", "url": "https://x.com/api", "headers": {}},
+            "/nonexistent/report.json",
+        )
+        assert "error" in result
+
+    def test_header_value_mismatch(self, tmp_path):
+        captured = self._captured_record(
+            headers={"content-type": "application/json",
+                     "x-tsign-client-id": "WEB"},
+        )
+        report_path = self._write_report(tmp_path, [captured])
+
+        failed = {
+            "method": "POST",
+            "url": "https://api.example.com/openwebserver/v3/signflows/sys_flowId/sign/sys_accountId/setCacheData",
+            "headers": {"content-type": "application/json",
+                        "x-tsign-client-id": "PC_SIMPLE"},  # wrong value
+        }
+        result = diagnose_request(failed, report_path)
+
+        header_diffs = [d for d in result["diffs"] if d["field"] == "header"]
+        assert any(d["key"] == "x-tsign-client-id" and
+                   d["captured"] == "WEB" and d["actual"] == "PC_SIMPLE"
+                   for d in header_diffs)

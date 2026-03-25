@@ -386,6 +386,247 @@ def detect_set_cookies(records: list[dict]) -> dict[str, list[str]]:
     return {k: sorted(v) for k, v in endpoint_cookies.items()}
 
 
+# ─── Request Diagnosis ────────────────────────────────────────────────
+
+# Headers to skip when comparing (too noisy / always different)
+_SKIP_DIFF_HEADERS = {
+    "cookie", "user-agent", "accept", "accept-language", "accept-encoding",
+    "connection", "host", "origin", "referer", "content-length",
+    "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
+    "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site",
+}
+
+
+def _skeleton_path(path: str) -> str:
+    """Replace all variable-looking segments with * for fuzzy matching.
+
+    Both real IDs and server-side aliases become *, so:
+      /signflows/sys_flowId/setCacheData  → /signflows/*/setCacheData
+      /signflows/13b3276b.../setCacheData → /signflows/*/setCacheData
+    """
+    parts = path.strip("/").split("/")
+    skeleton = []
+    for part in parts:
+        if (re.match(r"^\d+$", part)
+                or re.match(r"^[0-9a-f]{8}-[0-9a-f]{4}-", part, re.I)
+                or re.match(r"^[0-9a-f]{24,}$", part, re.I)
+                or _is_alias_segment(part)):
+            skeleton.append("*")
+        else:
+            skeleton.append(part)
+    return "/" + "/".join(skeleton)
+
+
+def _diff_hint(captured_val: str, actual_val: str) -> str:
+    """Generate a hint explaining the difference."""
+    if _is_alias_segment(captured_val):
+        return (f"captured value '{captured_val}' looks like a server-side alias "
+                f"— use it literally instead of '{actual_val}'")
+    if _is_alias_segment(actual_val):
+        return (f"your value '{actual_val}' looks like an alias but captured used "
+                f"'{captured_val}' — check which is correct")
+    return f"value mismatch: captured '{captured_val}' vs yours '{actual_val}'"
+
+
+def diagnose_request(failed: dict, report_json_path: str) -> dict:
+    """Compare a failed request against captured successful requests to find diffs.
+
+    Args:
+        failed: {
+            "method": "POST",
+            "url": "https://...",
+            "headers": {"content-type": "...", "webserver-token": "..."},
+            "body": {...} or None,
+            "status": 403,  # optional, for context
+        }
+        report_json_path: Path to a captured report JSON file (captures/ or reports/)
+
+    Returns:
+        {
+            "matched_record": {"seq": N, "url": "...", "status": 200} or None,
+            "diffs": [
+                {"field": "path", "segment": 3,
+                 "captured": "sys_flowId", "actual": "13b3276b...",
+                 "hint": "..."},
+                ...
+            ],
+            "no_diff_fields": ["method", "body", ...],
+        }
+        or {"error": "...", "candidates": [...]} if no match found.
+    """
+    # Load report
+    report_path = Path(report_json_path)
+    if not report_path.exists():
+        return {"error": f"report file not found: {report_json_path}", "candidates": []}
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    records = report.get("records", [])
+    if not records:
+        return {"error": "no records in report", "candidates": []}
+
+    # Parse failed request
+    failed_parsed = urlparse(failed["url"])
+    failed_path = failed_parsed.path
+    failed_method = failed["method"].upper()
+    failed_normalized = normalize_path(failed_path)
+    failed_skeleton = _skeleton_path(failed_path)
+    failed_qp = {k: v[0] if len(v) == 1 else v
+                 for k, v in parse_qs(failed_parsed.query).items()}
+    failed_headers = {k.lower(): v for k, v in failed.get("headers", {}).items()}
+    failed_body = failed.get("body")
+
+    # Find matching record: exact normalized match first, then skeleton match
+    match = None
+    for rec in records:
+        if rec["method"].upper() != failed_method:
+            continue
+        if rec.get("normalized_path") == failed_normalized:
+            match = rec
+            break
+
+    if not match:
+        for rec in records:
+            if rec["method"].upper() != failed_method:
+                continue
+            if _skeleton_path(rec.get("path", "")) == failed_skeleton:
+                match = rec
+                break
+
+    if not match:
+        # Return closest candidates
+        candidates = []
+        for rec in records:
+            if rec["method"].upper() == failed_method:
+                candidates.append(f"{rec['method']} {rec.get('path', '?')[:80]}")
+        return {
+            "error": f"no matching endpoint for {failed_method} {failed_path}",
+            "candidates": sorted(set(candidates))[:10],
+        }
+
+    # ── Build diffs ──
+    diffs = []
+    no_diff = []
+
+    # 1. Path diff (segment by segment)
+    cap_segments = match["path"].strip("/").split("/")
+    fail_segments = failed_path.strip("/").split("/")
+    path_has_diff = False
+    max_segs = max(len(cap_segments), len(fail_segments))
+    for i in range(max_segs):
+        cap_seg = cap_segments[i] if i < len(cap_segments) else "<missing>"
+        fail_seg = fail_segments[i] if i < len(fail_segments) else "<missing>"
+        if cap_seg != fail_seg:
+            path_has_diff = True
+            diffs.append({
+                "field": "path", "segment": i,
+                "captured": cap_seg, "actual": fail_seg,
+                "hint": _diff_hint(cap_seg, fail_seg),
+            })
+    if not path_has_diff:
+        no_diff.append("path")
+
+    # 2. Query params diff
+    cap_qp = match.get("query_params", {})
+    qp_has_diff = False
+    all_keys = set(cap_qp.keys()) | set(failed_qp.keys())
+    for key in sorted(all_keys):
+        cap_val = cap_qp.get(key)
+        fail_val = failed_qp.get(key)
+        if cap_val is not None and fail_val is None:
+            qp_has_diff = True
+            diffs.append({
+                "field": "query_param", "key": key,
+                "captured": str(cap_val), "actual": "<missing>",
+                "hint": f"missing query param '{key}' (captured value: '{cap_val}')",
+            })
+        elif cap_val is None and fail_val is not None:
+            qp_has_diff = True
+            diffs.append({
+                "field": "query_param", "key": key,
+                "captured": "<missing>", "actual": str(fail_val),
+                "hint": f"extra query param '{key}' not seen in capture",
+            })
+        elif str(cap_val) != str(fail_val):
+            qp_has_diff = True
+            diffs.append({
+                "field": "query_param", "key": key,
+                "captured": str(cap_val), "actual": str(fail_val),
+                "hint": _diff_hint(str(cap_val), str(fail_val)),
+            })
+    if not qp_has_diff:
+        no_diff.append("query_params")
+
+    # 3. Headers diff (skip noisy ones)
+    cap_headers = {k.lower(): v for k, v in match.get("request_headers", {}).items()}
+    headers_has_diff = False
+    cap_interesting = {k: v for k, v in cap_headers.items() if k not in _SKIP_DIFF_HEADERS}
+    fail_interesting = {k: v for k, v in failed_headers.items() if k not in _SKIP_DIFF_HEADERS}
+    all_hkeys = set(cap_interesting.keys()) | set(fail_interesting.keys())
+    for key in sorted(all_hkeys):
+        cap_val = cap_interesting.get(key)
+        fail_val = fail_interesting.get(key)
+        if cap_val is not None and fail_val is None:
+            headers_has_diff = True
+            diffs.append({
+                "field": "header", "key": key,
+                "captured": str(cap_val)[:100], "actual": "<missing>",
+                "hint": f"missing header '{key}'",
+            })
+        elif cap_val is None and fail_val is not None:
+            pass  # Extra headers from script are usually fine
+        elif str(cap_val) != str(fail_val):
+            headers_has_diff = True
+            diffs.append({
+                "field": "header", "key": key,
+                "captured": str(cap_val)[:100], "actual": str(fail_val)[:100],
+                "hint": f"header '{key}' value mismatch",
+            })
+    if not headers_has_diff:
+        no_diff.append("headers")
+
+    # 4. Body diff (structural: compare top-level keys if both are dicts)
+    cap_body = match.get("request_body")
+    body_has_diff = False
+    if isinstance(cap_body, dict) and isinstance(failed_body, dict):
+        cap_keys = set(cap_body.keys())
+        fail_keys = set(failed_body.keys())
+        missing = cap_keys - fail_keys
+        extra = fail_keys - cap_keys
+        if missing:
+            body_has_diff = True
+            diffs.append({
+                "field": "body", "key": "missing_keys",
+                "captured": sorted(missing), "actual": "<missing>",
+                "hint": f"request body missing keys: {sorted(missing)}",
+            })
+        if extra:
+            body_has_diff = True
+            diffs.append({
+                "field": "body", "key": "extra_keys",
+                "captured": "<not present>", "actual": sorted(extra),
+                "hint": f"request body has extra keys not in capture: {sorted(extra)}",
+            })
+    elif cap_body is not None and failed_body is None:
+        body_has_diff = True
+        diffs.append({
+            "field": "body", "key": "body",
+            "captured": "<present>", "actual": "<missing>",
+            "hint": "captured request had a body but yours doesn't",
+        })
+    if not body_has_diff:
+        no_diff.append("body")
+
+    return {
+        "matched_record": {
+            "seq": match.get("seq"),
+            "url": match.get("url", "")[:200],
+            "status": match.get("response_status"),
+        },
+        "diffs": diffs,
+        "no_diff_fields": no_diff,
+    }
+
+
 # ─── Credential Extraction & Sanitization ────────────────────────────
 
 SENSITIVE_COOKIE_KEYS = {

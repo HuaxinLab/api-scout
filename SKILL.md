@@ -311,9 +311,41 @@ ls $TOOL_DIR/reports/{domain}*.md
 脚本写好后协助用户测试：
 
 1. 运行脚本，观察是否成功
-2. 如果 401/403 → 凭证可能过期 → 建议用户重新抓包更新 credentials
-3. 如果返回数据异常 → 对比抓包数据检查请求参数是否完整
-4. 如果遇到反爬拦截 → 确认该端点的反爬结论，可能需要切换为浏览器方案
+2. **如果某个端点返回非 200（如 403/401/500）→ 立即使用诊断功能**：
+
+```python
+from scripts.api_capture import diagnose_request
+
+result = diagnose_request(
+    failed={
+        "method": "POST",
+        "url": "https://api.example.com/signflows/13b3276b.../setCacheData",
+        "headers": {"webserver-token": "abc", "x-tsign-client-id": "PC_SIMPLE"},
+        "body": {"cacheData": "..."},
+        "status": 403,
+    },
+    report_json_path="$TOOL_DIR/reports/{domain}_{timestamp}.json",
+)
+# result["diffs"] 会列出失败请求与抓包成功请求的所有差异
+# result["diffs"][0] 可能是:
+#   {"field": "path", "captured": "sys_flowId", "actual": "13b3276b...",
+#    "hint": "captured value looks like a server-side alias — use it literally"}
+```
+
+诊断函数会自动：
+- 在抓包记录中找到对应的成功请求（支持模糊匹配，即使路径中的 ID 不同也能匹配）
+- 逐字段对比：路径段、query params、headers、body 结构
+- 对每个差异生成 hint（如"服务端变量别名，需原样使用"）
+
+3. 根据诊断结果修正脚本，常见问题：
+   - **路径中应使用 `sys_*` 别名** → hint 会明确提示
+   - **缺少关键 header** → 补上抓包记录中的 header
+   - **header 值不同** → 如 `x-tsign-client-id` 应为 `WEB` 而非 `PC_SIMPLE`
+   - **query param 使用了真实 ID 而非别名** → 改为抓包中的字面量
+   - **request body 缺少字段** → 补上缺失的 key
+4. 如果诊断返回 `no match` → 该端点可能没被抓到，建议用户补抓
+5. 如果所有字段都一致但仍失败 → 凭证可能过期，建议用户重新抓包更新 credentials
+6. 如果遇到反爬拦截 → 确认该端点的反爬结论，可能需要切换为浏览器方案
 
 ---
 
