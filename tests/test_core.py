@@ -10,7 +10,7 @@ from pathlib import Path
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tools.api_capture import (
+from scripts.api_capture import (
     load_profile,
     path_matches_patterns,
     categorize_path,

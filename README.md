@@ -14,7 +14,7 @@ api-scout/
 ├── profiles/                ← 站点配置
 │   ├── _default.yaml        ← 通用兜底
 │   └── <site>.yaml          ← 自定义站点（gitignored）
-├── tools/
+├── scripts/
 │   └── api_capture.py       ← 核心抓包脚本
 ├── examples/                ← API 调用示例脚本（gitignored）
 ├── tests/
@@ -39,16 +39,16 @@ playwright install chromium
 
 ```bash
 # 使用预置 Profile
-python tools/api_capture.py --profile <site>
+python scripts/api_capture.py --profile <site>
 
 # 自定义 URL
-python tools/api_capture.py --url "https://www.example.com"
+python scripts/api_capture.py --url "https://www.example.com"
 
 # URL + 域名过滤
-python tools/api_capture.py --url "https://www.example.com" --filter "example.com"
+python scripts/api_capture.py --url "https://www.example.com" --filter "example.com"
 
 # Profile + URL 覆盖
-python tools/api_capture.py --profile <site> --url "https://example.com/special"
+python scripts/api_capture.py --profile <site> --url "https://example.com/special"
 ```
 
 | 参数 | 缩写 | 说明 |

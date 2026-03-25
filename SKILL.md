@@ -1,47 +1,27 @@
 ---
 name: api-scout
-description: Capture and reverse-engineer any website's API. Launches a browser for manual operation, records all API traffic, then analyzes auth patterns, endpoints, and anti-scraping mechanisms to produce an implementation plan.
+description: 抓包并逆向分析任意网站的 API。启动浏览器让用户手动操作，自动记录所有 API 流量，分析认证模式、端点结构和反爬机制，生成 API 文档并辅助开发调用脚本。当用户说「抓包」「抓 API」「逆向 API」「分析网站接口」「capture API」时触发。
 ---
 
-# API Scout — Web API Reverse Engineering Skill
+# API Scout — Web API 逆向抓包 Skill
 
-You are an API reverse engineering assistant. Your job is to help the user capture, analyze, and understand any website's internal API, then produce actionable implementation guidance.
+你是一个 API 逆向工程助手。你的任务是帮助用户（可能完全不懂代码）抓取、分析任意网站的内部 API，最终产出可直接用于开发的 API 文档和示例脚本。
 
-## Tool Location
-
-Locate the api-scout project directory. Try these in order:
-
-1. If already known from context, use that path
-2. Search for it: `find ~/Projects -name "api-scout" -type d -maxdepth 4 2>/dev/null | head -1`
-3. Ask the user
-
-All commands below use `$TOOL_DIR` as a placeholder for this path:
-
-```bash
-# Example — adjust to actual location
-TOOL_DIR=$(find ~/Projects -name "api-scout" -type d -path "*/skills/*" -maxdepth 5 2>/dev/null | head -1)
-echo "API Scout at: $TOOL_DIR"
-```
-
-## Available Profiles
-
-Pre-configured profiles live in `$TOOL_DIR/profiles/`. Each profile defines URL, domain filters, noise paths to ignore, API categories, and known auth patterns.
-
-To discover available profiles:
-```bash
-ls $TOOL_DIR/profiles/*.yaml
-```
-
-`_default.yaml` is the built-in fallback that captures all domains without filtering. Other `.yaml` files are site-specific profiles — read them to see their target URL and configuration.
-
-You can also create new profiles — see "Creating a New Profile" section below.
+以下用 `$TOOL_DIR` 代指本工具目录。
 
 ---
 
-## Workflow
+## 完整工作流
 
-### Step 1: Environment Setup (first run only)
+### 第 1 步：环境准备
 
+检查 `.venv` 是否存在：
+
+```bash
+ls $TOOL_DIR/.venv/bin/activate 2>/dev/null
+```
+
+**首次使用**（`.venv` 不存在）：
 ```bash
 cd $TOOL_DIR
 python3 -m venv .venv && source .venv/bin/activate
@@ -49,391 +29,324 @@ pip install -r requirements.txt -q
 playwright install chromium
 ```
 
-If `.venv` already exists, only activate it:
-
+**已有环境**：
 ```bash
 cd $TOOL_DIR && source .venv/bin/activate
 ```
 
-### Step 2: Run the Capture
+向用户确认环境就绪后，进入下一步。
 
-Choose ONE of the following based on user input:
+---
 
-**A) With a known profile (recommended):**
+### 第 2 步：确认抓包目标
+
+在启动抓包前，先和用户明确以下信息：
+
+1. **目标网站** — URL 是什么？
+2. **要抓什么操作** — 聊天、生成图片、下单、搜索？用户需要在浏览器中手动执行这些操作
+3. **是否需要登录** — 如果需要，用户要在弹出的浏览器中自行登录
+4. **是否有现成的 Profile** — 检查已有配置：
+
 ```bash
-python tools/api_capture.py --profile <profile_name>
-```
-Example: `python tools/api_capture.py --profile <name>`
-
-The profile provides the URL, filters, and categories automatically.
-
-**B) With a profile + URL override:**
-```bash
-python tools/api_capture.py --profile <profile_name> --url "https://custom.url.com"
-```
-
-**C) With a raw URL (no profile):**
-```bash
-python tools/api_capture.py --url "https://www.example.com"
+ls $TOOL_DIR/profiles/*.yaml
 ```
 
-**D) With a raw URL + domain filter:**
+**也检查是否已有该网站的历史数据**（避免重复抓包）：
+
 ```bash
-python tools/api_capture.py --url "https://www.example.com" --filter "example.com"
+ls $TOOL_DIR/reports/ 2>/dev/null
+ls $TOOL_DIR/credentials/ 2>/dev/null
 ```
 
-**E) Blank page (user navigates manually):**
+如果已有报告且用户只是想分析 API，直接读取现有报告即可，不必重新抓包。
+
+---
+
+### 第 3 步：启动抓包
+
+根据情况选择命令：
+
 ```bash
-python tools/api_capture.py
+# A) 使用已有 Profile（推荐）
+python scripts/api_capture.py --profile <name>
+
+# B) Profile + 自定义 URL
+python scripts/api_capture.py --profile <name> --url "https://example.com/page"
+
+# C) 直接指定 URL（无 Profile）
+python scripts/api_capture.py --url "https://www.example.com"
+
+# D) URL + 域名过滤（只抓指定域名的请求）
+python scripts/api_capture.py --url "https://www.example.com" --filter "example.com"
+
+# E) 空白页（用户自行导航）
+python scripts/api_capture.py
 ```
 
-#### CLI Arguments Reference
+| 参数 | 缩写 | 说明 |
+|------|------|------|
+| `--profile` | `-p` | Profile 名，加载 `profiles/<name>.yaml` |
+| `--url` | `-u` | 起始 URL，覆盖 profile 的 url |
+| `--filter` | `-f` | 域名过滤，只抓包含此字符串的域名请求 |
 
-| Arg | Short | Description |
-|-----|-------|-------------|
-| `--profile` | `-p` | Profile name (loads `profiles/<name>.yaml`) |
-| `--url` | `-u` | Starting URL (overrides profile's `url` field) |
-| `--filter` | `-f` | Only capture requests to domains containing this string (overrides profile's `filter_domains`) |
+**启动后告诉用户：**
 
-#### What to Tell the User
+> 浏览器正在打开，请：
+> 1. 如果需要，先**登录**网站
+> 2. **执行你想抓取的完整操作**（例如：发一条消息、生成一张图、完成一次搜索等）
+> 3. 操作完成后**关闭浏览器窗口**，即结束抓包
+>
+> 注意：默认超时 10 分钟，请高效操作。
 
-After running the command, a visible Chromium browser window will open. Tell the user:
+---
 
-> Browser is opening. Please:
-> 1. **Log in** to the target site if needed
-> 2. **Perform the complete workflow** you want to reverse-engineer
->    (e.g., start a chat, generate a video, upload a file, etc.)
-> 3. **Close the browser window** when done — this ends the capture
+### 第 4 步：读取抓包结果
 
-**Important:** The capture runs with a 10-minute timeout by default. For long workflows, warn the user to work efficiently.
-
-#### Output Files
-
-When the browser closes, the script saves to **three** directories:
+浏览器关闭后，脚本自动输出到三个目录：
 
 ```
 $TOOL_DIR/
-├── captures/                          ← RAW (contains sensitive cookies/tokens, gitignored)
-│   └── {domain}_{timestamp}.json      Full request/response data with real credentials
-│
-├── credentials/                       ← CREDENTIALS (extracted cookies/tokens, gitignored)
-│   └── {domain}.json                  Deduplicated cookies + tokens, merged across captures
-│
-└── reports/                           ← SANITIZED (safe to share/commit)
-    ├── {domain}_{timestamp}.md        Human-readable analysis report (credentials masked)
-    └── {domain}_{timestamp}.json      Structured data with credentials masked
+├── captures/{domain}_{timestamp}.json      ← 原始数据（含真实 cookies/tokens，已 gitignore）
+├── credentials/{domain}.json               ← 提取的凭证（跨次抓包自动合并，已 gitignore）
+└── reports/
+    ├── {domain}_{timestamp}.md             ← 脱敏分析报告（可安全分享）
+    └── {domain}_{timestamp}.json           ← 脱敏结构化数据
 ```
 
-**Security model:**
-- `captures/` and `credentials/` are **gitignored** — they contain real session tokens
-- `reports/` is **safe to share** — all cookie values, tokens, and `a_bogus` are masked (e.g., `sessionid=e7a08d********`)
-- `credentials/{domain}.json` is **merged across captures** — each new capture updates it, so you always have the latest tokens
+**先读报告 Markdown**，快速了解全貌：
 
-The script prints all file paths at the end. Use the `reports/` paths for analysis.
+```
+Read $TOOL_DIR/reports/{domain}_{timestamp}.md
+```
 
-#### Credentials File Format
+**报告包含以下章节：**
 
-`credentials/{domain}.json` contains:
+| 章节 | 内容 |
+|------|------|
+| 0. API Categories | 按 Profile 类别分组的端点列表（仅当 Profile 定义了类别时出现） |
+| 1. Authentication Analysis | 检测到的 cookies、认证 headers、签名参数 |
+| 2. Request Timeline | 按时间顺序的全部 API 请求列表 |
+| 3. Endpoint Details | 每个端点的详细信息：headers、query params、request body、response body |
+| 4. WebSocket Connections | WebSocket 连接及消息样本（仅当有 WS 流量时出现） |
+
+**需要真实凭证**（用于后续开发）时读：
+```
+Read $TOOL_DIR/credentials/{domain}.json
+```
+
+凭证文件格式：
 ```json
 {
-  "cookies": {
-    "sessionid": "actual_value",
-    "sid_tt": "actual_value",
-    "uid_tt": "actual_value"
-  },
-  "tokens": {
-    "header:x-tt-passport-csrf-token": "actual_value",
-    "query:msToken": "actual_value"
-  },
+  "cookies": { "sessionid": "真实值", "sid_tt": "真实值" },
+  "tokens": { "header:x-tt-passport-csrf-token": "真实值", "query:msToken": "真实值" },
   "full_cookie_string": "sessionid=xxx; sid_tt=xxx; ...",
   "last_updated": "2026-03-20T16:24:43"
 }
 ```
 
-Use this file when:
-- Building an API client that needs real credentials
-- Validating if a session is still active
-- Comparing credentials across captures (e.g., did the token change?)
+**SSE 响应**会被自动解析为结构化摘要（`response_body._sse_summary == true`），包含事件计数和样本。
 
-### Step 3: Read the Output
+---
 
-Read from the **reports/** directory (sanitized, safe):
+### 第 5 步：分析并给出建议
 
-```
-Read $TOOL_DIR/reports/{domain}_{timestamp}.md      ← start here for overview
-Read $TOOL_DIR/reports/{domain}_{timestamp}.json    ← dig into specific requests
-```
+读完报告后，**必须**向用户做一次诊断性反馈，涵盖：
 
-If you need **real credential values** (e.g., to build an API client), read:
-```
-Read $TOOL_DIR/credentials/{domain}.json            ← real cookies/tokens
-```
+#### 5a. 抓包质量评估
 
-If you need the **full raw data** (unsanitized), read:
-```
-Read $TOOL_DIR/captures/{domain}_{timestamp}.json   ← everything, including raw cookies
-```
+- **请求数太少**（< 5 个 API 请求）→ 建议用户重新抓包，操作更完整
+- **缺少关键操作** → 比如用户说要分析"聊天"但报告中没有 chat 相关端点 → 建议再抓一次，确保执行了目标操作
+- **过滤太严** → Profile 的 filter_domains 可能过滤掉了有用请求 → 建议用 `--filter` 覆盖或不用 Profile 重试
+- **操作覆盖多个流程** → 例如同时有聊天和图片生成 → 如果数据足够，可以继续分析
 
-**Report Markdown sections:**
-- **Section 0 — API Categories**: Endpoints grouped by category (only if profile defines categories)
-- **Section 1 — Authentication Analysis**: Detected cookies, auth headers, signature params
-- **Section 2 — Request Timeline**: Chronological list of all captured API calls with status and category
-- **Section 3 — Endpoint Details**: Per-endpoint breakdown with headers, query params, request body, response body samples
-- **Section 4 — WebSocket Connections**: WS connections with message samples (direction, payload, size) — only present if WebSocket traffic was captured
+#### 5b. 下一步建议
 
-**Report JSON structure:**
-- `meta`: Capture metadata (profile, timestamp, counts, `total_ws_messages`)
-- `profile`: The full profile config used
-- `auth_analysis`: Detected auth patterns
-- `endpoints`: Endpoint → call count mapping
-- `records[]`: Array of every captured HTTP request (credentials masked)
-- `ws_records[]`: Array of every WebSocket message (conn_id, direction, payload)
+根据抓包结果，明确告诉用户接下来可以做什么：
 
-**SSE responses** are auto-parsed into structured summaries instead of being truncated. Look for `response_body._sse_summary == true`:
-```json
-{
-  "_sse_summary": true,
-  "total_events": 15,
-  "event_counts": {"SSE_HEARTBEAT": 1, "STREAM_CHUNK": 12, "SSE_REPLY_END": 2},
-  "sample_events": [{"event": "STREAM_CHUNK", "data": {"seq_no": 1, ...}}, ...]
-}
-```
+1. **继续抓包** — 如果需要覆盖更多操作流程（例如已抓了"聊天"，还想抓"生成图片"）
+2. **整理 API 文档** — 如果数据足够，可以合并多次抓包生成完整的 API 规格文档
+3. **直接开发** — 如果只有一次抓包且内容完整，可以跳过文档编译直接写脚本
 
-### Existing API Specs and Examples
+---
 
-Before running a new capture, check if specs or examples already exist:
+### 第 6 步：深度分析
 
-```bash
-ls $TOOL_DIR/reports/*_api_spec.md 2>/dev/null    # compiled API specifications
-ls $TOOL_DIR/examples/ 2>/dev/null                # working API client scripts
-```
+对抓到的数据做深入分析，覆盖以下维度：
 
-- **API Specs** (`reports/{domain}_api_spec.md`): Consolidated endpoint documentation compiled from multiple captures. Read these first when the user asks about a site's API.
-- **Examples** (`examples/`): Working API client scripts that demonstrate how to call specific APIs. Typically include cookie/auth handling, SSE streaming, etc.
+#### 认证机制
 
-Example: an API client script might look like:
-```python
-# Pure HTTP call with cookie auth and SSE streaming
-import httpx
+- 使用了哪些 session/auth cookies？（查看 `auth_analysis.cookie_keys`）
+- 是否有 `Authorization` header？
+- 是否有自定义签名 header？（如 `Sign`, `Device-Time`）
+- 是否有认证相关的 query params？（如 `a_bogus`, `msToken`）
+- 会话如何建立？（查看 init 类别的请求）
 
-resp = httpx.post("https://example.com/api/chat/completion",
-    headers={"Cookie": cookie_string},
-    json={"message": "hello", "conversation_id": conv_id},
-    timeout=60)
-# Parse SSE stream...
-```
+#### 签名 / 反爬分析
 
-When the user asks to use an existing API, read the spec + example first instead of re-capturing.
+- 对比同一端点的多次调用 — `a_bogus`、`msToken`、`Sign` 的值是否变化？
+- **每次请求都变** → 动态生成，可能需要浏览器环境
+- **同一会话内不变** → 可提取一次复用
+- 观察是否有 timestamp + hash 的模式（如 `Sign = MD5(salt + uri + timestamp)`）
+- query params 中的长 base64 字符串（如 `a_bogus`）通常是浏览器指纹
 
-### Running Tests
+**可行性结论（必须给出）：**
+- **纯 HTTP 可行** — 无反爬或签名可复现，httpx/requests 即可调用
+- **需要浏览器** — 存在动态浏览器指纹 token，必须用 Playwright
+- **混合模式** — 多数端点纯 HTTP 可行，但特定端点（如提交任务）需要浏览器
 
-After modifying any core logic in `tools/api_capture.py`, run tests:
+#### API 端点地图
 
-```bash
-cd $TOOL_DIR && source .venv/bin/activate
-python -m pytest tests/ -v
-```
+为每个端点记录：
+- HTTP 方法 + 路径
+- 用途（从路径名、请求/响应内容、类别推断）
+- 必需的 headers（尤其非标准的）
+- 请求体结构及字段类型
+- 响应体结构及关键字段
 
-53 tests cover: profile loading, path matching, request filtering, body/SSE processing, path normalization, auth detection, endpoint grouping, credential extraction, sanitization, markdown generation.
+#### 请求流程
 
-### Step 4: Analyze and Report
+- 识别逻辑调用顺序（如 `init → auth → submit → poll → download`）
+- 识别数据依赖（如 `webid` 的响应提供了后续所有请求需要的 `web_id`）
+- 以编号列表或 mermaid 图呈现
 
-Perform a deep analysis covering these areas:
+---
 
-#### 4a. Authentication Mechanism
-- What session/auth cookies are used? (look at `auth_analysis.cookie_keys`)
-- Is there an `Authorization` header?
-- Are there custom signature headers? (e.g., `Sign`, `Device-Time`)
-- Are there auth-related query parameters? (e.g., `a_bogus`, `msToken`)
-- How are sessions established? (look at init-category requests)
+### 第 7 步：输出分析报告
 
-#### 4b. Signature / Anti-Scraping Analysis
-- Compare the same endpoint across multiple calls — do `a_bogus`, `msToken`, or `Sign` values change?
-- If values change per-request: likely generated dynamically (may need browser)
-- If values are static per-session: can be extracted once and reused
-- Look for timestamp + hash patterns (e.g., `Sign = MD5(salt + uri + timestamp)`)
-- Long base64-like strings in query params (e.g., `a_bogus`) usually indicate browser-generated fingerprints
-
-**Verdict categories:**
-- **Pure HTTP feasible**: Simple or no anti-scraping, reproducible signatures
-- **Browser required**: Dynamic browser fingerprint tokens (a_bogus, msToken) that can't be computed server-side
-- **Hybrid**: Most endpoints work via HTTP, but specific ones (e.g., task submission) need browser
-
-#### 4c. API Endpoint Map
-For each unique endpoint, document:
-- HTTP method + path
-- Purpose (inferred from path name, request/response content, and category)
-- Required headers (especially non-standard ones)
-- Request body structure with field types
-- Response body structure with key fields
-- Anti-scraping status (pure HTTP / browser required)
-
-#### 4d. Request Flow
-- Identify the logical call sequence (e.g., `init → auth → submit → poll → download`)
-- Identify data dependencies (e.g., `webid` response provides `web_id` used in all subsequent calls)
-- Present as a numbered list or mermaid diagram
-
-### Step 5: Present the Report
-
-Output a structured report:
+向用户输出结构化报告：
 
 ```markdown
-## API Analysis Report — {site name}
+## API 分析报告 — {站点名称}
 
-### Summary
-- Total endpoints: N
-- Auth method: [cookie / token / signature / ...]
-- Anti-scraping: [none / simple sign / browser-required for X]
-- Profile used: {profile_name}
+### 摘要
+- 总端点数: N
+- 认证方式: [cookie / token / 签名 / ...]
+- 反爬机制: [无 / 简单签名 / 部分端点需要浏览器]
+- 使用的 Profile: {profile_name}
 
-### Authentication
-[Details from 4a — which cookies, headers, params are required]
+### 认证分析
+[哪些 cookies、headers、params 是必需的]
 
-### Anti-Scraping
-[Details from 4b]
-**Verdict:** [Pure HTTP feasible / Browser required for endpoint X / Hybrid]
+### 反爬分析
+[详细分析]
+**结论:** [纯 HTTP 可行 / 端点 X 需要浏览器 / 混合模式]
 
-### API Flow
-[Numbered steps or mermaid diagram from 4d]
+### API 调用流程
+[编号列表或 mermaid 图]
 
-### Endpoint Reference
-[Table from 4c]
-| Method | Path | Purpose | Auth | Anti-Scraping |
-|--------|------|---------|------|---------------|
-| POST | /chat/completion | Send message | cookie + msToken | a_bogus (browser) |
-| ... | ... | ... | ... | ... |
+### 端点列表
+| 方法 | 路径 | 用途 | 认证 | 反爬 |
+|------|------|------|------|------|
+| POST | /chat/completion | 发送消息 | cookie + msToken | a_bogus（需浏览器） |
 
-### Implementation Recommendations
-1. Which endpoints can be called with pure HTTP (httpx/requests)
-2. Which endpoints need browser automation (Playwright)
-3. Suggested implementation order
-4. Known risks: rate limiting patterns, token expiry, content filtering
+### 实现建议
+1. 哪些端点可用纯 HTTP 调用
+2. 哪些端点必须用浏览器自动化
+3. 建议实现顺序
+4. 已知风险：限流、token 过期、内容过滤
 ```
 
-### Step 6: Compile API Spec (when user is ready to develop)
+---
 
-When the user says "整理 API 文档", "compile API spec", or is about to start implementation, consolidate all captures for a domain into one definitive spec.
+### 第 8 步：编译 API 文档
 
-#### When to trigger
-- User explicitly asks to compile/consolidate/整理
-- User is about to start coding and there are multiple capture files for the same domain
-- Do NOT auto-trigger after a single capture — the user may plan more captures first
+当用户说"整理 API 文档"、"compile API spec"或准备开发时，将多次抓包合并为一份完整的 API 规格文档。
 
-#### How to compile
+**触发时机：**
+- 用户主动要求整理/编译
+- 用户准备开始写代码，且同一域名有多次抓包
+- **不要**在单次抓包后自动触发 — 用户可能还计划继续抓
 
-1. **List all reports for the domain:**
+**编译流程：**
+
+1. 列出该域名所有报告：
 ```bash
 ls $TOOL_DIR/reports/{domain}*.md
 ```
 
-2. **Read all report Markdown files** for that domain (chronologically)
+2. 按时间顺序读取全部报告 Markdown
 
-3. **Merge and deduplicate:**
-   - Union all unique endpoints across all captures
-   - For endpoints that appear in multiple captures, use the most recent and most complete example
-   - Merge auth analysis (union of all cookies, headers, params seen)
-   - Identify endpoints only seen in specific workflows (tag them, e.g., `[chat-only]`, `[video-only]`)
+3. 合并去重：
+   - 取所有抓包中的端点并集
+   - 重复端点取最新最完整的示例
+   - 合并认证分析（所有 cookies、headers、params 的并集）
+   - 标注仅在特定流程出现的端点（如 `[仅聊天]`、`[仅生图]`）
 
-4. **Write the consolidated spec** to `$TOOL_DIR/reports/{domain}_api_spec.md`:
+4. 写入 `$TOOL_DIR/reports/{domain}_api_spec.md`
 
-```markdown
-# {Site Name} — API Specification
+5. 读取 `$TOOL_DIR/credentials/{domain}.json`，在文档中标注各端点需要哪些凭证
 
-> Compiled from N captures ({date_range})
-> Profile: {profile_name}
-
-## Authentication
-[Merged auth analysis — all cookies, tokens, signatures observed across all captures]
-
-## Anti-Scraping
-[Verdict — which endpoints need browser, which work with pure HTTP]
-
-## API Flow
-[Combined flow diagram covering all workflows captured]
-
-### Flow: Chat
-1. init → 2. create conversation → 3. send message → 4. stream response
-
-### Flow: Image Generation (if captured)
-1. upload image → 2. submit task → 3. poll → 4. download
-
-## Endpoint Reference
-
-### Category: init
-| Method | Path | Purpose | Auth | Notes |
-|--------|------|---------|------|-------|
-| POST | /webid | Get device web_id | none | Called once per session |
-| ... | ... | ... | ... | ... |
-
-### Category: chat
-| Method | Path | Purpose | Auth | Notes |
-|--------|------|---------|------|-------|
-| POST | /chat/completion | Send message (SSE) | cookie + a_bogus | Browser required |
-| ... | ... | ... | ... | ... |
-
-[Continue for each category...]
-
-## Endpoint Details
-
-### POST /chat/completion [chat]
-- **Purpose:** Send a chat message and receive streaming response
-- **Auth:** Cookie session + msToken + a_bogus (browser required)
-- **Request Body:**
-  ```json
-  {field: type, ...}
-  ```
-- **Response:** SSE stream / JSON
-- **Notes:** [Any quirks, rate limits, error codes observed]
-
-[Continue for each endpoint...]
-```
-
-5. **Also update credentials** — read `$TOOL_DIR/credentials/{domain}.json` and note which credentials are needed for which endpoints in the spec.
-
-#### Output
-- Compiled spec: `$TOOL_DIR/reports/{domain}_api_spec.md`
-- This file is the **single source of truth** for development — all implementation should reference it
-- It replaces reading individual capture reports (those are kept for historical reference)
-
-### Step 7: Assist with Implementation (if requested)
-
-If the user wants to build an API client based on the compiled spec:
-
-1. **Read the API spec** at `$TOOL_DIR/reports/{domain}_api_spec.md`
-2. **Read credentials** at `$TOOL_DIR/credentials/{domain}.json`
-3. **Generate a Python client class** with methods for each endpoint in the spec
-4. **Implement signature/auth logic** if the algorithm is identifiable
-5. **Set up Playwright browser automation** for endpoints marked as browser-required
-6. **Write polling/retry logic** for async task patterns (submit → poll → download)
-7. **Create a new profile** if the user plans to capture more from this site
+**产出：**
+- `reports/{domain}_api_spec.md` — 该域名的**唯一权威 API 文档**
+- 后续开发全部参考此文件，不再逐个读单次抓包报告
 
 ---
 
-## Creating a New Profile
+### 第 9 步：开发 API 调用脚本
 
-When analyzing a new site, or when the user asks to add a profile, create a YAML file in `$TOOL_DIR/profiles/`:
+用户准备开发时：
+
+1. 读取 API 文档：`$TOOL_DIR/reports/{domain}_api_spec.md`
+2. 读取凭证：`$TOOL_DIR/credentials/{domain}.json`
+3. 检查是否已有示例脚本：`ls $TOOL_DIR/examples/ 2>/dev/null`
+4. 根据 API 文档和凭证开发 Python 脚本
+
+**开发原则：**
+
+- 纯 HTTP 端点用 `httpx` 或 `requests`
+- 需要浏览器的端点用 `playwright`
+- SSE 流式响应需要特殊处理（逐行读取 `event:` / `data:` 行）
+- 异步任务模式需要轮询（submit → poll status → download result）
+- Cookie/token 从 `credentials/{domain}.json` 读取
+
+**脚本保存到** `$TOOL_DIR/examples/` 目录。
+
+#### 测试与调试
+
+脚本写好后协助用户测试：
+
+1. 运行脚本，观察是否成功
+2. 如果 401/403 → 凭证可能过期 → 建议用户重新抓包更新 credentials
+3. 如果返回数据异常 → 对比抓包数据检查请求参数是否完整
+4. 如果遇到反爬拦截 → 确认该端点的反爬结论，可能需要切换为浏览器方案
+
+---
+
+## Profile 管理
+
+### 查看已有 Profile
+
+```bash
+ls $TOOL_DIR/profiles/*.yaml
+```
+
+`_default.yaml` 是通用兜底，不做特殊过滤。其他 `.yaml` 是站点专用配置。
+
+### 创建新 Profile
+
+在 `$TOOL_DIR/profiles/` 下创建 YAML 文件：
 
 ```yaml
-name: 站点名称 (domain)
-description: One-line description
+name: 站点名称
+description: 一句话描述
 
 url: https://www.example.com
 
-# Only capture requests to these domains (empty = capture all)
+# 只抓这些域名的请求（空 = 全部抓）
 filter_domains:
   - example.com
 
-# Paths to ignore (supports trailing * glob)
+# 忽略的路径（支持尾部 * 通配）
 ignore_paths:
   - /analytics/*
   - /tracking/*
   - /static/*
 
-# Domains to ignore entirely
+# 完全忽略的域名
 ignore_domains:
   - google-analytics.com
 
-# Group endpoints into categories for the report
+# 端点分类（按业务功能分组）
 api_categories:
   auth:
     - /api/login
@@ -444,45 +357,49 @@ api_categories:
   poll:
     - /api/status/*
 
-# Known auth patterns to highlight in analysis
+# 已知的认证字段（帮助分析识别）
 auth_hints:
   query_params: []
   cookies: [sessionid]
   headers: [Authorization]
 ```
 
-**Profile design tips:**
-- `ignore_paths`: Add high-frequency noise paths (telemetry, analytics, AB test configs) discovered during first capture
-- `api_categories`: Group by business function (auth, core action, polling, upload, etc.)
-- `auth_hints`: Pre-fill known auth field names so the analysis highlights them even if naming is non-standard
-- Run a capture WITHOUT a profile first, then create the profile based on what you see
+**建议：** 先不用 Profile 抓一次，观察噪音和关键端点后再创建 Profile。
 
 ---
 
-## Important Notes
+## 修改核心脚本后的测试
 
-- **Trust captured data only** — do not guess endpoint behavior, base all analysis on actual requests/responses
-- **Sensitive data warning** — capture files contain cookies, tokens, and session IDs. Warn the user if they plan to share or commit these files
-- **Too few requests?** — if the capture has < 5 API requests, suggest re-running with more thorough manual operation
-- **Large responses truncated** — bodies > 50KB are truncated in the JSON. If a specific response needs full content, the user should re-capture or use browser DevTools
-- **Profile mismatch** — if a profile filters too aggressively (missing expected requests), suggest running without `filter_domains` or with `--filter` override to debug
-- **The JSON is the source of truth** — the Markdown is a convenience summary. Always refer to JSON for exact header values, full query params, etc.
-
-## Reusing Previous Captures
-
-Not every interaction requires a fresh capture. Check for existing data first:
+如果修改了 `scripts/api_capture.py`，必须运行测试：
 
 ```bash
-ls $TOOL_DIR/reports/       # existing analysis reports
-ls $TOOL_DIR/credentials/   # existing credentials
+cd $TOOL_DIR && source .venv/bin/activate
+python -m pytest tests/ -v
 ```
 
-**When to reuse:**
-- User asks to analyze a site's API and `reports/{domain}_*.md` already exists → read the latest report, skip capture
-- User asks to build an API client → read `credentials/{domain}.json` for real tokens + `reports/` for endpoint specs
-- User says "re-capture" or "capture again" → run a new capture, it will merge new credentials into the existing file
+53 个测试覆盖：Profile 加载、路径匹配、请求过滤、body/SSE 处理、路径归一化、认证检测、端点分组、凭证提取、脱敏、Markdown 生成。
 
-**When NOT to reuse:**
-- User explicitly asks for a fresh capture
-- Credentials file is stale (check `last_updated` timestamp — tokens may expire in hours)
-- Previous capture was for a different workflow (e.g., had chat data but now needs video generation)
+---
+
+## 复用历史数据
+
+不是每次都需要重新抓包，先检查已有数据：
+
+**可以复用的情况：**
+- 用户要分析某站 API 且 `reports/{domain}_*.md` 已存在 → 读最新报告
+- 用户要开发脚本 → 读 `credentials/{domain}.json` + `reports/` 中的规格文档
+- 用户说"再抓一次" → 新抓包会自动合并 credentials
+
+**不应复用的情况：**
+- 用户明确要求重新抓包
+- 凭证可能过期（检查 `last_updated` 时间戳 — token 可能几小时就过期）
+- 上次抓包是不同的操作流程
+
+---
+
+## 注意事项
+
+- **只信任抓到的数据** — 不要猜测端点行为，所有分析基于真实请求/响应
+- **敏感数据警告** — captures/ 和 credentials/ 包含真实 token，提醒用户不要分享或提交
+- **JSON 是真相** — Markdown 只是摘要，精确的 header 值、完整 query params 等以 JSON 为准
+- **大响应会截断** — 超过 50KB 的 body 会在 JSON 中被截断，需要完整内容时用户可重新抓包或用浏览器 DevTools
