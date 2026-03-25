@@ -124,10 +124,15 @@ Read $TOOL_DIR/reports/{domain}_{timestamp}.md
 | 章节 | 内容 |
 |------|------|
 | 0. API Categories | 按 Profile 类别分组的端点列表（仅当 Profile 定义了类别时出现） |
+| ⚠️ Anomaly Alerts | **重点关注** — 服务端变量别名（如 `sys_flowId`，必须原样使用不能替换为真实 ID）、Set-Cookie 追踪（哪些端点设置了新 cookie） |
 | 1. Authentication Analysis | 检测到的 cookies、认证 headers、签名参数 |
 | 2. Request Timeline | 按时间顺序的全部 API 请求列表 |
 | 3. Endpoint Details | 每个端点的详细信息：headers、query params、request body、response body |
 | 4. WebSocket Connections | WebSocket 连接及消息样本（仅当有 WS 流量时出现） |
+
+**特别注意 ⚠️ Anomaly Alerts 章节**：如果报告中出现此章节，说明检测到了需要特殊处理的模式。典型场景：
+- **服务端变量别名**（如 `sys_flowId`）— URL 路径或 query param 中出现 `sys_*`、`$*`、`__*__` 等模式，表示这些值是服务端变量占位符，**必须原样保留**，不能替换为真实 ID，否则会被网关拒绝
+- **Set-Cookie 关键节点** — 某些端点会通过 Set-Cookie 设置新 cookie（如负载均衡的 `SERVERID`、Java session 的 `JSESSIONID`），后续请求依赖这些 cookie，必须捕获并合并到请求中
 
 **需要真实凭证**（用于后续开发）时读：
 ```

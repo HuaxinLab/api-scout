@@ -24,6 +24,9 @@ from scripts.api_capture import (
     sanitize_record,
     generate_markdown,
     _mask,
+    _is_alias_segment,
+    detect_path_anomalies,
+    detect_set_cookies,
 )
 
 
@@ -422,3 +425,177 @@ class TestGenerateMarkdown:
         records, auth, groups, profile = self._make_data()
         md = generate_markdown(records, auth, groups, profile, [])
         assert "## 4. WebSocket Connections" not in md
+
+    def test_anomaly_section_shown(self):
+        records, auth, groups, profile = self._make_data()
+        anomalies = {
+            "alias_segments": {
+                "sys_flowId": {"count": 3, "location": "path",
+                               "endpoints": ["GET /api/sys_flowId/detail"]},
+            },
+            "alias_query_params": {},
+        }
+        set_cookie_map = {
+            "GET /login": ["JSESSIONID", "SERVERID"],
+        }
+        md = generate_markdown(records, auth, groups, profile,
+                               anomalies=anomalies, set_cookie_map=set_cookie_map)
+        assert "Anomaly Alerts" in md
+        assert "sys_flowId" in md
+        assert "JSESSIONID" in md
+        assert "Set-Cookie" in md
+
+    def test_no_anomaly_section_when_empty(self):
+        records, auth, groups, profile = self._make_data()
+        md = generate_markdown(records, auth, groups, profile,
+                               anomalies={}, set_cookie_map={})
+        assert "Anomaly Alerts" not in md
+
+
+# ─── Alias Segment Detection ──────────────────────────────────────
+
+class TestIsAliasSegment:
+
+    def test_sys_prefix(self):
+        assert _is_alias_segment("sys_flowId") is True
+        assert _is_alias_segment("sys_accountId") is True
+        assert _is_alias_segment("sys_transId") is True
+
+    def test_dollar_prefix(self):
+        assert _is_alias_segment("$flowId") is True
+
+    def test_double_underscore(self):
+        assert _is_alias_segment("__flowId__") is True
+
+    def test_curly_braces(self):
+        assert _is_alias_segment("{flowId}") is True
+        assert _is_alias_segment("{{flowId}}") is True
+
+    def test_colon_prefix(self):
+        assert _is_alias_segment(":flowId") is True
+
+    def test_normal_segments(self):
+        assert _is_alias_segment("v1") is False
+        assert _is_alias_segment("signflows") is False
+        assert _is_alias_segment("openwebserver") is False
+        assert _is_alias_segment("api") is False
+
+    def test_real_ids_not_alias(self):
+        assert _is_alias_segment("726c36e7648d4c7e") is False
+        assert _is_alias_segment("12345") is False
+
+
+# ─── Path Anomaly Detection ───────────────────────────────────────
+
+class TestDetectPathAnomalies:
+
+    def _make_record(self, method="GET", path="/api/test",
+                     query_params=None):
+        return {
+            "method": method,
+            "path": path,
+            "normalized_path": normalize_path(path),
+            "query_params": query_params or {},
+        }
+
+    def test_detects_sys_in_path(self):
+        records = [
+            self._make_record(path="/openwebserver/v3/signflows/sys_flowId/detail"),
+            self._make_record(path="/openwebserver/v3/signflows/sys_flowId/config"),
+        ]
+        result = detect_path_anomalies(records)
+        assert "sys_flowId" in result["alias_segments"]
+        assert result["alias_segments"]["sys_flowId"]["count"] == 2
+
+    def test_detects_sys_in_query_params(self):
+        records = [
+            self._make_record(
+                path="/webserver-will/v1/willingness/sys_transId/info",
+                query_params={"transId": "sys_transId", "client": "WEB"}
+            ),
+        ]
+        result = detect_path_anomalies(records)
+        assert "sys_transId" in result["alias_segments"]
+        assert "transId=sys_transId" in result["alias_query_params"]
+
+    def test_no_anomalies_for_normal_paths(self):
+        records = [
+            self._make_record(path="/api/v1/users/12345/profile"),
+            self._make_record(path="/api/v1/orders",
+                              query_params={"page": "1", "limit": "20"}),
+        ]
+        result = detect_path_anomalies(records)
+        assert len(result["alias_segments"]) == 0
+        assert len(result["alias_query_params"]) == 0
+
+    def test_multiple_alias_types(self):
+        records = [
+            self._make_record(path="/api/sys_flowId/sign/sys_accountId/data"),
+        ]
+        result = detect_path_anomalies(records)
+        assert "sys_flowId" in result["alias_segments"]
+        assert "sys_accountId" in result["alias_segments"]
+
+
+# ─── Set-Cookie Detection ─────────────────────────────────────────
+
+class TestDetectSetCookies:
+
+    def test_detects_set_cookies(self):
+        records = [
+            {
+                "method": "GET",
+                "path": "/login",
+                "normalized_path": "/login",
+                "set_cookies": ["JSESSIONID", "SERVERID"],
+            },
+            {
+                "method": "GET",
+                "path": "/api/data",
+                "normalized_path": "/api/data",
+                "set_cookies": [],
+            },
+        ]
+        result = detect_set_cookies(records)
+        assert "GET /login" in result
+        assert "JSESSIONID" in result["GET /login"]
+        assert "SERVERID" in result["GET /login"]
+        assert "GET /api/data" not in result
+
+    def test_no_set_cookies(self):
+        records = [
+            {
+                "method": "GET",
+                "path": "/api/data",
+                "normalized_path": "/api/data",
+                "set_cookies": [],
+            },
+        ]
+        result = detect_set_cookies(records)
+        assert len(result) == 0
+
+    def test_merges_across_requests(self):
+        records = [
+            {
+                "method": "GET",
+                "path": "/login",
+                "normalized_path": "/login",
+                "set_cookies": ["JSESSIONID"],
+            },
+            {
+                "method": "GET",
+                "path": "/login",
+                "normalized_path": "/login",
+                "set_cookies": ["SERVERID"],
+            },
+        ]
+        result = detect_set_cookies(records)
+        assert "GET /login" in result
+        assert set(result["GET /login"]) == {"JSESSIONID", "SERVERID"}
+
+    def test_missing_set_cookies_field(self):
+        records = [
+            {"method": "GET", "path": "/api", "normalized_path": "/api"},
+        ]
+        result = detect_set_cookies(records)
+        assert len(result) == 0

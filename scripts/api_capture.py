@@ -294,6 +294,98 @@ def group_endpoints(records: list[dict]) -> dict[str, list[dict]]:
     return groups
 
 
+# ─── Anomaly Detection ───────────────────────────────────────────────
+
+# Patterns that look like server-side variable aliases / template vars
+_ALIAS_PATTERNS = [
+    re.compile(r"^sys_\w+$"),          # sys_flowId, sys_accountId
+    re.compile(r"^\$\w+$"),            # $flowId
+    re.compile(r"^__\w+__$"),          # __flowId__
+    re.compile(r"^\{\{?\w+\}?\}$"),    # {flowId} or {{flowId}}
+    re.compile(r"^:\w+$"),             # :flowId (Express-style)
+]
+
+
+def _is_alias_segment(segment: str) -> bool:
+    """Check if a path segment looks like a server-side variable alias."""
+    return any(p.match(segment) for p in _ALIAS_PATTERNS)
+
+
+def detect_path_anomalies(records: list[dict]) -> dict:
+    """Detect unusual path patterns that may require special handling.
+
+    Returns:
+        {
+            "alias_segments": {
+                "sys_flowId": {"count": 12, "location": "path", "endpoints": [...]},
+                ...
+            },
+            "alias_query_params": {
+                "transId": {"value": "sys_transId", "count": 8, "endpoints": [...]},
+                ...
+            },
+        }
+    """
+    alias_segments: dict[str, dict] = {}
+    alias_query_params: dict[str, dict] = {}
+
+    for rec in records:
+        path = rec.get("path", "")
+        endpoint = f"{rec['method']} {rec.get('normalized_path', path)}"
+
+        # Check path segments
+        for segment in path.strip("/").split("/"):
+            if _is_alias_segment(segment):
+                if segment not in alias_segments:
+                    alias_segments[segment] = {"count": 0, "location": "path",
+                                               "endpoints": set()}
+                alias_segments[segment]["count"] += 1
+                alias_segments[segment]["endpoints"].add(endpoint)
+
+        # Check query param values for alias patterns
+        for key, val in rec.get("query_params", {}).items():
+            val_str = val if isinstance(val, str) else str(val)
+            if _is_alias_segment(val_str):
+                pk = f"{key}={val_str}"
+                if pk not in alias_query_params:
+                    alias_query_params[pk] = {"param": key, "value": val_str,
+                                              "count": 0, "endpoints": set()}
+                alias_query_params[pk]["count"] += 1
+                alias_query_params[pk]["endpoints"].add(endpoint)
+
+    # Convert sets to sorted lists for JSON serialization
+    for v in alias_segments.values():
+        v["endpoints"] = sorted(v["endpoints"])
+    for v in alias_query_params.values():
+        v["endpoints"] = sorted(v["endpoints"])
+
+    return {
+        "alias_segments": alias_segments,
+        "alias_query_params": alias_query_params,
+    }
+
+
+def detect_set_cookies(records: list[dict]) -> dict[str, list[str]]:
+    """Detect which endpoints set new cookies via Set-Cookie headers.
+
+    Returns:
+        { "GET /openwebserver/login": ["JSESSIONID", "SERVERID"], ... }
+    """
+    endpoint_cookies: dict[str, set[str]] = {}
+
+    for rec in records:
+        set_cookie_names = rec.get("set_cookies", [])
+        if not set_cookie_names:
+            continue
+
+        endpoint = f"{rec['method']} {rec.get('normalized_path', rec.get('path', '?'))}"
+        if endpoint not in endpoint_cookies:
+            endpoint_cookies[endpoint] = set()
+        endpoint_cookies[endpoint].update(set_cookie_names)
+
+    return {k: sorted(v) for k, v in endpoint_cookies.items()}
+
+
 # ─── Credential Extraction & Sanitization ────────────────────────────
 
 SENSITIVE_COOKIE_KEYS = {
@@ -395,10 +487,14 @@ def sanitize_record(rec: dict) -> dict:
 # ─── Markdown Report ─────────────────────────────────────────────────
 
 def generate_markdown(records: list[dict], auth_info: dict, groups: dict,
-                      profile: dict, ws_records: list[dict] | None = None) -> str:
+                      profile: dict, ws_records: list[dict] | None = None,
+                      anomalies: dict | None = None,
+                      set_cookie_map: dict | None = None) -> str:
     """Generate a human-readable Markdown analysis report."""
     name = profile.get("name", "unknown")
     ws_records = ws_records or []
+    anomalies = anomalies or {}
+    set_cookie_map = set_cookie_map or {}
     lines = [
         f"# API Capture Report — {name}",
         "",
@@ -436,6 +532,44 @@ def generate_markdown(records: list[dict], auth_info: dict, groups: dict,
             for ep in uncategorized:
                 count = len(groups[ep])
                 lines.append(f"- `{ep}` ({count} calls)")
+            lines.append("")
+
+    # Anomaly warnings
+    alias_segs = anomalies.get("alias_segments", {})
+    alias_qps = anomalies.get("alias_query_params", {})
+    has_anomalies = alias_segs or alias_qps or set_cookie_map
+    if has_anomalies:
+        lines += ["---", "", "## ⚠️ Anomaly Alerts", ""]
+
+        if alias_segs or alias_qps:
+            lines.append("### Server-side Variable Aliases")
+            lines.append("")
+            lines.append("> The following path segments / query params appear to be "
+                         "server-side variable aliases.")
+            lines.append("> They may need to be used **as literal strings** in the URL, "
+                         "NOT replaced with real IDs.")
+            lines.append("")
+            for seg, info in sorted(alias_segs.items()):
+                ep_count = len(info["endpoints"])
+                lines.append(f"- **`{seg}`** — appears in {info['count']} requests "
+                             f"across {ep_count} endpoint(s)")
+            for key, info in sorted(alias_qps.items()):
+                ep_count = len(info["endpoints"])
+                lines.append(f"- **`{key}`** (query param) — appears in "
+                             f"{info['count']} requests across {ep_count} endpoint(s)")
+            lines.append("")
+
+        if set_cookie_map:
+            lines.append("### Set-Cookie Tracking")
+            lines.append("")
+            lines.append("> These endpoints set new cookies via `Set-Cookie` response "
+                         "headers.")
+            lines.append("> Subsequent requests may depend on these cookies — "
+                         "capture and merge them.")
+            lines.append("")
+            for endpoint, cookie_names in sorted(set_cookie_map.items()):
+                names_str = ", ".join(f"`{n}`" for n in cookie_names)
+                lines.append(f"- `{endpoint}` → {names_str}")
             lines.append("")
 
     # Auth analysis
@@ -691,6 +825,22 @@ async def run_capture(profile: dict, url_override: str | None, filter_override: 
             except Exception:
                 pass
 
+            # Extract Set-Cookie names from response
+            set_cookie_names = []
+            try:
+                resp_headers = response.headers
+                # Playwright merges multiple Set-Cookie into one with \n
+                raw_sc = resp_headers.get("set-cookie", "")
+                if raw_sc:
+                    for sc_line in raw_sc.split("\n"):
+                        sc_line = sc_line.strip()
+                        if sc_line and "=" in sc_line:
+                            cookie_name = sc_line.split("=", 1)[0].strip()
+                            if cookie_name:
+                                set_cookie_names.append(cookie_name)
+            except Exception:
+                pass
+
             record = {
                 "seq": seq,
                 "timestamp": datetime.now().isoformat(),
@@ -709,6 +859,7 @@ async def run_capture(profile: dict, url_override: str | None, filter_override: 
                 "response_headers": dict(response.headers),
                 "response_body": resp_body,
                 "response_body_size": resp_body_size,
+                "set_cookies": set_cookie_names,
             }
 
             # Add category if profile defines one
@@ -861,6 +1012,8 @@ def save_results(records: list[dict], ws_records: list[dict],
     raw_json_path = CAPTURES_DIR / f"{domain}_{timestamp}.json"
     auth_info = detect_auth_patterns(records, profile)
     groups = group_endpoints(records)
+    anomalies = detect_path_anomalies(records)
+    set_cookie_map = detect_set_cookies(records)
 
     raw_output = {
         "meta": {
@@ -874,6 +1027,8 @@ def save_results(records: list[dict], ws_records: list[dict],
         },
         "profile": profile,
         "auth_analysis": auth_info,
+        "anomalies": anomalies,
+        "set_cookie_map": set_cookie_map,
         "endpoints": {k: len(v) for k, v in groups.items()},
         "records": records,
         "ws_records": ws_records,
@@ -915,6 +1070,8 @@ def save_results(records: list[dict], ws_records: list[dict],
         "meta": raw_output["meta"],
         "profile": profile,
         "auth_analysis": auth_info,
+        "anomalies": anomalies,
+        "set_cookie_map": set_cookie_map,
         "endpoints": {k: len(v) for k, v in sanitized_groups.items()},
         "records": sanitized_records,
         "ws_records": ws_records,
@@ -925,7 +1082,7 @@ def save_results(records: list[dict], ws_records: list[dict],
 
     # Sanitized Markdown
     md_content = generate_markdown(sanitized_records, auth_info, sanitized_groups,
-                                   profile, ws_records)
+                                   profile, ws_records, anomalies, set_cookie_map)
     report_md_path.write_text(md_content, encoding="utf-8")
 
     print(f"\n{'='*55}")
