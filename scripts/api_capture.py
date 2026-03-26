@@ -11,6 +11,8 @@ Usage:
 """
 
 import argparse
+import asyncio
+import base64
 import json
 import re
 import time
@@ -981,6 +983,24 @@ def generate_markdown(records: list[dict], auth_info: dict, groups: dict,
 
 # ─── Main Capture Logic ─────────────────────────────────────────────
 
+def _extract_set_cookie_names(headers: dict) -> list[str]:
+    """Extract cookie names from response headers (CDP format).
+
+    CDP may provide Set-Cookie as a single \\n-separated string or as
+    individual entries depending on the browser version.
+    """
+    names = []
+    for key, val in headers.items():
+        if key.lower() == "set-cookie":
+            for line in val.split("\n"):
+                line = line.strip()
+                if line and "=" in line:
+                    name = line.split("=", 1)[0].strip()
+                    if name:
+                        names.append(name)
+    return names
+
+
 async def run_capture(profile: dict, url_override: str | None, filter_override: str | None):
     from playwright.async_api import async_playwright
 
@@ -1027,66 +1047,111 @@ async def run_capture(profile: dict, url_override: str | None, filter_override: 
 
         page = await context.new_page()
 
-        async def on_response(response):
-            nonlocal seq
-            request = response.request
-            req_url = request.url
-            resource_type = request.resource_type
+        # ── CDP-based network capture ──────────────────────────────
+        # Using CDP gives us precise Set-Cookie headers, request
+        # initiators, and proper redirect chain tracking that
+        # Playwright's high-level API merges or loses.
 
-            # Get content types
-            resp_ct = None
-            try:
-                resp_ct = response.headers.get("content-type", "")
-            except Exception:
-                pass
-            req_ct = request.headers.get("content-type", "")
+        cdp = await context.new_cdp_session(page)
+        await cdp.send("Network.enable")
+
+        # Track pending requests (requestId → request info)
+        _pending: dict[str, dict] = {}
+
+        def on_request_will_be_sent(params):
+            """CDP Network.requestWillBeSent — store request details."""
+            req = params["request"]
+            _pending[params["requestId"]] = {
+                "method": req["method"],
+                "url": req["url"],
+                "headers": req.get("headers", {}),
+                "post_data": req.get("postData"),
+                "resource_type": params.get("type", "Other"),
+                "initiator": params.get("initiator", {}),
+                "redirect_chain": [],
+            }
+
+        def on_request_will_be_sent_redirect(params):
+            """Handle redirects — preserve Set-Cookie from intermediate hops."""
+            rid = params["requestId"]
+            redirect_resp = params.get("redirectResponse")
+            if rid in _pending and redirect_resp:
+                # Save redirect hop info
+                _pending[rid].setdefault("redirect_chain", []).append({
+                    "url": redirect_resp.get("url", ""),
+                    "status": redirect_resp.get("status"),
+                    "set_cookies": _extract_set_cookie_names(
+                        redirect_resp.get("headers", {})),
+                })
+            # Update request info for the new destination
+            on_request_will_be_sent(params)
+
+        async def on_response_received(params):
+            """CDP Network.responseReceived — match with pending request, build record."""
+            nonlocal seq
+            rid = params["requestId"]
+            pending = _pending.get(rid)
+            if not pending:
+                return
+
+            resp = params["response"]
+            req_url = resp.get("url") or pending["url"]
+            resource_type = params.get("type", pending.get("resource_type", "Other")).lower()
+
+            # Content types
+            resp_headers = resp.get("headers", {})
+            resp_ct = resp_headers.get("content-type", resp_headers.get("Content-Type", ""))
+            req_ct = pending["headers"].get("content-type",
+                                            pending["headers"].get("Content-Type", ""))
 
             # Apply profile-aware filtering
             if not is_api_request(req_url, resp_ct or req_ct, resource_type, profile):
                 return
 
+            # Fetch response body via CDP
+            resp_body = None
+            resp_body_size = 0
+            try:
+                body_result = await cdp.send("Network.getResponseBody",
+                                             {"requestId": rid})
+                raw_body = body_result.get("body", "")
+                if body_result.get("base64Encoded"):
+                    raw_bytes = base64.b64decode(raw_body)
+                    resp_body_size = len(raw_bytes)
+                    resp_body = safe_body(raw_bytes, resp_ct)
+                else:
+                    resp_body_size = len(raw_body.encode("utf-8", errors="replace"))
+                    resp_body = safe_body(raw_body, resp_ct)
+            except Exception:
+                pass
+
+            # Extract Set-Cookie — CDP gives separate headers properly
+            set_cookie_names = _extract_set_cookie_names(resp_headers)
+
+            # Also collect Set-Cookies from redirect chain
+            for hop in pending.get("redirect_chain", []):
+                set_cookie_names.extend(hop.get("set_cookies", []))
+            # Deduplicate while preserving order
+            seen = set()
+            unique_sc = []
+            for name in set_cookie_names:
+                if name not in seen:
+                    seen.add(name)
+                    unique_sc.append(name)
+            set_cookie_names = unique_sc
+
             seq += 1
             parsed = urlparse(req_url)
             elapsed = round(time.time() - start_time, 2)
 
-            # Capture request body
-            req_body = None
-            try:
-                req_body = request.post_data
-            except Exception:
-                pass
-
-            # Capture response body
-            resp_body = None
-            resp_body_size = 0
-            try:
-                raw = await response.body()
-                resp_body_size = len(raw)
-                resp_body = safe_body(raw, resp_ct)
-            except Exception:
-                pass
-
-            # Extract Set-Cookie names from response
-            set_cookie_names = []
-            try:
-                resp_headers = response.headers
-                # Playwright merges multiple Set-Cookie into one with \n
-                raw_sc = resp_headers.get("set-cookie", "")
-                if raw_sc:
-                    for sc_line in raw_sc.split("\n"):
-                        sc_line = sc_line.strip()
-                        if sc_line and "=" in sc_line:
-                            cookie_name = sc_line.split("=", 1)[0].strip()
-                            if cookie_name:
-                                set_cookie_names.append(cookie_name)
-            except Exception:
-                pass
+            # Normalize request headers to lowercase keys (match Playwright behavior)
+            req_headers = {k.lower(): v for k, v in pending["headers"].items()}
 
             record = {
                 "seq": seq,
                 "timestamp": datetime.now().isoformat(),
                 "elapsed_seconds": elapsed,
-                "method": request.method,
+                "method": pending["method"],
                 "url": req_url,
                 "path": parsed.path,
                 "normalized_path": normalize_path(parsed.path),
@@ -1094,13 +1159,14 @@ async def run_capture(profile: dict, url_override: str | None, filter_override: 
                                  for k, v in parse_qs(parsed.query).items()},
                 "domain": parsed.netloc,
                 "resource_type": resource_type,
-                "request_headers": dict(request.headers),
-                "request_body": safe_body(req_body, req_ct),
-                "response_status": response.status,
-                "response_headers": dict(response.headers),
+                "request_headers": req_headers,
+                "request_body": safe_body(pending.get("post_data"), req_ct),
+                "response_status": resp["status"],
+                "response_headers": {k.lower(): v for k, v in resp_headers.items()},
                 "response_body": resp_body,
                 "response_body_size": resp_body_size,
                 "set_cookies": set_cookie_names,
+                "initiator_type": pending.get("initiator", {}).get("type", ""),
             }
 
             # Add category if profile defines one
@@ -1112,17 +1178,25 @@ async def run_capture(profile: dict, url_override: str | None, filter_override: 
             records.append(record)
 
             # Live output
-            status_icon = "✓" if 200 <= response.status < 400 else "✗"
+            status_icon = "✓" if 200 <= resp["status"] < 400 else "✗"
             cat_str = f" [{cat}]" if cat else ""
-            print(f"  [{seq:3d}] {status_icon} {request.method:6s} {response.status} "
+            print(f"  [{seq:3d}] {status_icon} {pending['method']:6s} {resp['status']} "
                   f"{parsed.path[:70]}{cat_str}")
 
-        page.on("response", on_response)
+        cdp.on("Network.requestWillBeSent", lambda params:
+               on_request_will_be_sent_redirect(params)
+               if "redirectResponse" in params
+               else on_request_will_be_sent(params))
+        cdp.on("Network.responseReceived", lambda params:
+               asyncio.ensure_future(on_response_received(params)))
 
-        # WebSocket capture
-        def on_websocket(ws):
+        # ── CDP-based WebSocket capture ────────────────────────────
+
+        _ws_conns: dict[str, dict] = {}  # requestId → {conn_id, url, domain, path}
+
+        def on_ws_created(params):
             nonlocal ws_seq
-            ws_url = ws.url
+            ws_url = params.get("url", "")
             parsed_ws = urlparse(ws_url)
 
             # Apply domain filter
@@ -1132,54 +1206,48 @@ async def run_capture(profile: dict, url_override: str | None, filter_override: 
 
             ws_seq += 1
             conn_id = ws_seq
+            _ws_conns[params["requestId"]] = {
+                "conn_id": conn_id, "url": ws_url,
+                "domain": parsed_ws.netloc, "path": parsed_ws.path,
+            }
             print(f"  [WS {conn_id}] Connected: {parsed_ws.netloc}{parsed_ws.path[:60]}")
 
-            def on_frame_sent(data):
-                nonlocal ws_seq
-                ws_seq += 1
-                payload = safe_body(data)
-                ws_records.append({
-                    "ws_seq": ws_seq,
-                    "conn_id": conn_id,
-                    "timestamp": datetime.now().isoformat(),
-                    "elapsed_seconds": round(time.time() - start_time, 2),
-                    "direction": "sent",
-                    "url": ws_url,
-                    "domain": parsed_ws.netloc,
-                    "path": parsed_ws.path,
-                    "payload": payload,
-                    "payload_size": len(data) if isinstance(data, (str, bytes)) else 0,
-                })
-                preview = str(payload)[:60] if payload else ""
-                print(f"  [WS {conn_id}] → SENT  {preview}")
+        def _on_ws_frame(params, direction):
+            nonlocal ws_seq
+            conn = _ws_conns.get(params["requestId"])
+            if not conn:
+                return
+            resp = params.get("response", {})
+            data = resp.get("payloadData", "")
+            ws_seq += 1
+            payload = safe_body(data)
+            ws_records.append({
+                "ws_seq": ws_seq,
+                "conn_id": conn["conn_id"],
+                "timestamp": datetime.now().isoformat(),
+                "elapsed_seconds": round(time.time() - start_time, 2),
+                "direction": direction,
+                "url": conn["url"],
+                "domain": conn["domain"],
+                "path": conn["path"],
+                "payload": payload,
+                "payload_size": len(data) if isinstance(data, (str, bytes)) else 0,
+            })
+            arrow = "→ SENT" if direction == "sent" else "← RECV"
+            preview = str(payload)[:60] if payload else ""
+            print(f"  [WS {conn['conn_id']}] {arrow}  {preview}")
 
-            def on_frame_received(data):
-                nonlocal ws_seq
-                ws_seq += 1
-                payload = safe_body(data)
-                ws_records.append({
-                    "ws_seq": ws_seq,
-                    "conn_id": conn_id,
-                    "timestamp": datetime.now().isoformat(),
-                    "elapsed_seconds": round(time.time() - start_time, 2),
-                    "direction": "received",
-                    "url": ws_url,
-                    "domain": parsed_ws.netloc,
-                    "path": parsed_ws.path,
-                    "payload": payload,
-                    "payload_size": len(data) if isinstance(data, (str, bytes)) else 0,
-                })
-                preview = str(payload)[:60] if payload else ""
-                print(f"  [WS {conn_id}] ← RECV  {preview}")
+        def on_ws_closed(params):
+            conn = _ws_conns.pop(params.get("requestId"), None)
+            if conn:
+                print(f"  [WS {conn['conn_id']}] Closed")
 
-            def on_close():
-                print(f"  [WS {conn_id}] Closed")
-
-            ws.on("framesent", on_frame_sent)
-            ws.on("framereceived", on_frame_received)
-            ws.on("close", on_close)
-
-        page.on("websocket", on_websocket)
+        cdp.on("Network.webSocketCreated", on_ws_created)
+        cdp.on("Network.webSocketFrameSent",
+               lambda p: _on_ws_frame(p, "sent"))
+        cdp.on("Network.webSocketFrameReceived",
+               lambda p: _on_ws_frame(p, "received"))
+        cdp.on("Network.webSocketClosed", on_ws_closed)
 
         # Navigate
         if url:
@@ -1194,6 +1262,12 @@ async def run_capture(profile: dict, url_override: str | None, filter_override: 
         # Wait for browser to close
         try:
             await page.wait_for_event("close", timeout=0)
+        except Exception:
+            pass
+
+        # Detach CDP session before closing
+        try:
+            await cdp.detach()
         except Exception:
             pass
 
