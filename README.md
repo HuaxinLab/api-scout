@@ -49,6 +49,9 @@ python scripts/api_capture.py --url "https://www.example.com" --filter "example.
 
 # Profile + URL 覆盖
 python scripts/api_capture.py --profile <site> --url "https://example.com/special"
+
+# CDP 模式（反检测严格的站点，使用用户真实 Chrome）
+python scripts/api_capture.py --cdp --url "https://www.example.com"
 ```
 
 | 参数 | 缩写 | 说明 |
@@ -56,8 +59,11 @@ python scripts/api_capture.py --profile <site> --url "https://example.com/specia
 | `--profile` | `-p` | Profile 名称，加载 `profiles/<name>.yaml` |
 | `--url` | `-u` | 起始 URL，覆盖 profile 中的 url |
 | `--filter` | `-f` | 域名过滤，覆盖 profile 中的 filter_domains |
+| `--cdp` | | CDP 模式，连接用户真实 Chrome（可选指定端口，默认 9222） |
 
-操作：浏览器弹出 → 登录 → 执行操作 → **关闭浏览器**结束抓包。
+操作：浏览器弹出 → 登录 → 执行操作 → **关闭浏览器**（Playwright）或**关闭标签页**（CDP）结束抓包。
+
+**CDP 模式**：当站点有严格的反自动化检测（登录跳转异常、验证码拦截）时使用。自动启动 Chrome 调试模式，首次会复制用户的 Chrome profile 保留登录状态。
 
 ## 输出文件
 

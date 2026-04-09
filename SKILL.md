@@ -72,7 +72,22 @@ ls $TOOL_DIR/credentials/ 2>/dev/null
 
 ### 第 3 步：启动抓包
 
-根据情况选择命令：
+有两种模式，根据目标站点的反爬强度选择：
+
+#### 模式选择
+
+| 模式 | 命令 | 适用场景 |
+|------|------|----------|
+| **Playwright 模式**（默认） | `python scripts/api_capture.py ...` | 大多数站点，自动打开浏览器 |
+| **CDP 模式** | `python scripts/api_capture.py --cdp ...` | 反自动化检测严格的站点（登录跳转异常、验证码拦截） |
+
+**如何判断需要 CDP 模式：** 先用默认 Playwright 模式尝试。如果出现以下症状，切换到 CDP 模式：
+- 点击登录后**自动跳转回首页**或跳到空白页
+- 登录页弹出**滑块验证码/安全检测**
+- 报告中出现大量 `captcha`、`verify`、`security` 相关请求但没有业务 API
+- 页面显示"设备异常"、"安全限制"等提示
+
+#### Playwright 模式命令
 
 ```bash
 # A) 使用已有 Profile（推荐）
@@ -91,18 +106,40 @@ python scripts/api_capture.py --url "https://www.example.com" --filter "example.
 python scripts/api_capture.py
 ```
 
+#### CDP 模式命令
+
+CDP 模式连接用户自己的 Chrome 浏览器（保留真实 cookie、扩展、指纹），不会被反自动化检测。
+
+```bash
+# F) CDP 模式（自动启动 Chrome，默认端口 9222）
+python scripts/api_capture.py --cdp --url "https://www.example.com"
+
+# G) CDP 模式 + 指定端口
+python scripts/api_capture.py --cdp 9223 --url "https://www.example.com"
+
+# H) CDP 模式 + Profile + 域名过滤
+python scripts/api_capture.py --cdp --profile <name> --filter "example.com"
+```
+
+**CDP 模式注意事项：**
+- 首次使用会自动复制 Chrome 的默认 profile（保留登录状态）
+- 如果 Chrome 已在调试模式运行，会直接连接
+- 用户需要先**关闭正在运行的 Chrome**，脚本会自动用调试模式重启
+- 抓包结束方式：**关闭当前标签页**（不是关闭整个浏览器）
+
 | 参数 | 缩写 | 说明 |
 |------|------|------|
 | `--profile` | `-p` | Profile 名，加载 `profiles/<name>.yaml` |
 | `--url` | `-u` | 起始 URL，覆盖 profile 的 url |
 | `--filter` | `-f` | 域名过滤，只抓包含此字符串的域名请求 |
+| `--cdp` | | CDP 模式，可选指定端口（默认 9222） |
 
 **启动后告诉用户：**
 
 > 浏览器正在打开，请：
 > 1. 如果需要，先**登录**网站
 > 2. **执行你想抓取的完整操作**（例如：发一条消息、生成一张图、完成一次搜索等）
-> 3. 操作完成后**关闭浏览器窗口**，即结束抓包
+> 3. 操作完成后**关闭浏览器窗口**（Playwright 模式）或**关闭当前标签页**（CDP 模式），即结束抓包
 >
 > 注意：默认超时 10 分钟，请高效操作。
 

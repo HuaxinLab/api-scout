@@ -1001,7 +1001,8 @@ def _extract_set_cookie_names(headers: dict) -> list[str]:
     return names
 
 
-async def run_capture(profile: dict, url_override: str | None, filter_override: str | None):
+async def run_capture(profile: dict, url_override: str | None,
+                      filter_override: str | None, cdp_port: int | None = None):
     from playwright.async_api import async_playwright
 
     url = url_override or profile.get("url")
@@ -1010,13 +1011,19 @@ async def run_capture(profile: dict, url_override: str | None, filter_override: 
     seq = 0
     ws_seq = 0
     start_time = time.time()
+    is_cdp_mode = cdp_port is not None
 
     profile_name = profile.get("name", "default")
+    mode_label = f"CDP (port {cdp_port})" if is_cdp_mode else "Playwright"
     print(f"\n╔══════════════════════════════════════════════════╗")
     print(f"║          API Scout — API Capture Tool            ║")
     print(f"╠══════════════════════════════════════════════════╣")
     print(f"║  Profile: {profile_name:<39s}║")
-    print(f"║  Browser is opening. Please:                     ║")
+    print(f"║  Mode:    {mode_label:<39s}║")
+    if is_cdp_mode:
+        print(f"║  Connecting to your Chrome browser...            ║")
+    else:
+        print(f"║  Browser is opening. Please:                     ║")
     print(f"║  1. Log in / navigate to the target site         ║")
     print(f"║  2. Perform the actions you want to capture      ║")
     print(f"║  3. Close the browser when done                  ║")
@@ -1027,25 +1034,44 @@ async def run_capture(profile: dict, url_override: str | None, filter_override: 
         profile["filter_domains"] = [filter_override]
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=False,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--start-maximized",
-            ],
-        )
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-            no_viewport=True,
-            locale="zh-CN",
-        )
+        if is_cdp_mode:
+            # ── CDP mode: connect to user's real Chrome ────────────
+            browser = await p.chromium.connect_over_cdp(
+                f"http://localhost:{cdp_port}"
+            )
+            context = browser.contexts[0]
+            # Use existing page or create a new tab
+            if context.pages:
+                page = context.pages[0]
+            else:
+                page = await context.new_page()
+        else:
+            # ── Playwright mode: launch new browser ────────────────
+            browser = await p.chromium.launch(
+                headless=False,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--start-maximized",
+                ],
+            )
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+                no_viewport=True,
+                locale="zh-CN",
+            )
+            page = await context.new_page()
 
-        page = await context.new_page()
+            # ── Stealth: hide automation fingerprints ──────────────
+            try:
+                from playwright_stealth import stealth_async
+                await stealth_async(page)
+            except ImportError:
+                pass  # playwright-stealth not installed, skip
 
         # ── CDP-based network capture ──────────────────────────────
         # Using CDP gives us precise Set-Cookie headers, request
@@ -1259,19 +1285,29 @@ async def run_capture(profile: dict, url_override: str | None, filter_override: 
         else:
             print("Blank page opened. Navigate to your target site.\n")
 
-        # Wait for browser to close
-        try:
-            await page.wait_for_event("close", timeout=0)
-        except Exception:
-            pass
+        # Wait for browser/tab to close
+        if is_cdp_mode:
+            # CDP mode: wait for the tab to close or navigate away
+            # User closes the tab (not the whole browser) to end capture
+            print("  (Close this tab or press Ctrl+C in terminal to end capture)\n")
+            try:
+                await page.wait_for_event("close", timeout=0)
+            except Exception:
+                pass
+        else:
+            # Playwright mode: wait for browser window to close
+            try:
+                await page.wait_for_event("close", timeout=0)
+            except Exception:
+                pass
 
-        # Detach CDP session before closing
+        # Detach CDP session
         try:
             await cdp.detach()
         except Exception:
             pass
 
-        # Extract cookies from browser context before closing
+        # Extract cookies from browser context
         browser_cookies = {}
         try:
             raw_cookies = await context.cookies()
@@ -1287,14 +1323,22 @@ async def run_capture(profile: dict, url_override: str | None, filter_override: 
         except Exception:
             pass
 
-        try:
-            await context.close()
-        except Exception:
-            pass
-        try:
-            await browser.close()
-        except Exception:
-            pass
+        # Cleanup: only close browser in Playwright mode
+        if not is_cdp_mode:
+            try:
+                await context.close()
+            except Exception:
+                pass
+            try:
+                await browser.close()
+            except Exception:
+                pass
+        else:
+            # CDP mode: disconnect without closing user's Chrome
+            try:
+                browser.close()
+            except Exception:
+                pass
 
     return records, ws_records
 
@@ -1417,18 +1461,88 @@ def save_results(records: list[dict], ws_records: list[dict],
     return report_md_path, report_json_path
 
 
+def _launch_chrome_cdp(port: int = 9222) -> tuple[int, bool]:
+    """Launch Chrome with remote debugging if not already running.
+
+    Returns (port, launched) where launched=True if we started Chrome.
+    """
+    import urllib.request
+    try:
+        urllib.request.urlopen(f"http://localhost:{port}/json/version", timeout=2)
+        return port, False  # already running
+    except Exception:
+        pass
+
+    # Try to launch Chrome
+    import subprocess, platform
+    chrome_paths = {
+        "Darwin": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "Linux": "google-chrome",
+    }
+    chrome_bin = chrome_paths.get(platform.system(), "google-chrome")
+    user_data = os.path.expanduser("~/.chrome-debug")
+    os.makedirs(user_data, exist_ok=True)
+
+    # Copy default profile if first time
+    default_profile = os.path.expanduser(
+        "~/Library/Application Support/Google/Chrome/Default"
+    )
+    dest_profile = os.path.join(user_data, "Default")
+    if not os.path.exists(dest_profile) and os.path.exists(default_profile):
+        import shutil
+        print("  Copying Chrome profile for first-time CDP setup...")
+        shutil.copytree(default_profile, dest_profile, symlinks=True,
+                        ignore=shutil.ignore_patterns("Cache", "Code Cache",
+                                                       "Service Worker", "GPUCache"))
+        local_state = os.path.expanduser(
+            "~/Library/Application Support/Google/Chrome/Local State"
+        )
+        if os.path.exists(local_state):
+            shutil.copy2(local_state, os.path.join(user_data, "Local State"))
+
+    subprocess.Popen(
+        [chrome_bin, f"--remote-debugging-port={port}",
+         f"--user-data-dir={user_data}"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+    # Wait for Chrome to be ready
+    import time as _time
+    for _ in range(20):
+        _time.sleep(1)
+        try:
+            urllib.request.urlopen(f"http://localhost:{port}/json/version", timeout=2)
+            return port, True
+        except Exception:
+            continue
+    raise RuntimeError(f"Chrome did not start on port {port} within 20s")
+
+
 def main():
     parser = argparse.ArgumentParser(description="API Scout — Universal API Capture Tool")
     parser.add_argument("--profile", "-p", help="Profile name (loads profiles/<name>.yaml)")
     parser.add_argument("--url", "-u", help="Starting URL (overrides profile url)")
     parser.add_argument("--filter", "-f", help="Domain filter (overrides profile filter_domains)")
+    parser.add_argument("--cdp", nargs="?", const=9222, type=int, metavar="PORT",
+                        help="CDP mode: connect to real Chrome (default port 9222). "
+                             "Auto-launches Chrome if not running.")
     args = parser.parse_args()
 
     profile = load_profile(args.profile)
     url = args.url or profile.get("url")
 
+    cdp_port = None
+    if args.cdp is not None:
+        cdp_port, launched = _launch_chrome_cdp(args.cdp)
+        if launched:
+            print(f"  Chrome launched with debugging on port {cdp_port}")
+        else:
+            print(f"  Connected to existing Chrome on port {cdp_port}")
+
     import asyncio
-    records, ws_records = asyncio.run(run_capture(profile, args.url, args.filter))
+    records, ws_records = asyncio.run(
+        run_capture(profile, args.url, args.filter, cdp_port=cdp_port)
+    )
     save_results(records, ws_records, profile, url)
 
 
