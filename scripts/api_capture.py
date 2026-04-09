@@ -1336,7 +1336,7 @@ async def run_capture(profile: dict, url_override: str | None,
         else:
             # CDP mode: disconnect without closing user's Chrome
             try:
-                browser.close()
+                await browser.close()
             except Exception:
                 pass
 
@@ -1480,25 +1480,21 @@ def _launch_chrome_cdp(port: int = 9222) -> tuple[int, bool]:
         "Linux": "google-chrome",
     }
     chrome_bin = chrome_paths.get(platform.system(), "google-chrome")
-    user_data = os.path.expanduser("~/.chrome-debug")
-    os.makedirs(user_data, exist_ok=True)
+    user_data = Path.home() / ".chrome-debug"
+    user_data.mkdir(parents=True, exist_ok=True)
 
     # Copy default profile if first time
-    default_profile = os.path.expanduser(
-        "~/Library/Application Support/Google/Chrome/Default"
-    )
-    dest_profile = os.path.join(user_data, "Default")
-    if not os.path.exists(dest_profile) and os.path.exists(default_profile):
+    default_profile = Path.home() / "Library/Application Support/Google/Chrome/Default"
+    dest_profile = user_data / "Default"
+    if not dest_profile.exists() and default_profile.exists():
         import shutil
         print("  Copying Chrome profile for first-time CDP setup...")
         shutil.copytree(default_profile, dest_profile, symlinks=True,
                         ignore=shutil.ignore_patterns("Cache", "Code Cache",
                                                        "Service Worker", "GPUCache"))
-        local_state = os.path.expanduser(
-            "~/Library/Application Support/Google/Chrome/Local State"
-        )
-        if os.path.exists(local_state):
-            shutil.copy2(local_state, os.path.join(user_data, "Local State"))
+        local_state = Path.home() / "Library/Application Support/Google/Chrome/Local State"
+        if local_state.exists():
+            shutil.copy2(local_state, user_data / "Local State")
 
     subprocess.Popen(
         [chrome_bin, f"--remote-debugging-port={port}",
